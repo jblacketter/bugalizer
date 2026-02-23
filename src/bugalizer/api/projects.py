@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from bugalizer.auth import require_api_key
+from bugalizer.config import settings
 from bugalizer.db import (
     project_create,
     project_delete,
@@ -17,6 +20,7 @@ from bugalizer.models import (
     ProjectListResponse,
     ProjectResponse,
     ProjectUpdate,
+    RepoMapResponse,
 )
 
 router = APIRouter(tags=["projects"])
@@ -106,3 +110,103 @@ def delete_project(
         )
     if not result:
         raise HTTPException(status_code=404, detail="Project not found")
+
+
+@router.post("/projects/{project_id}/clone")
+async def clone_project_repo(
+    project_id: str,
+    _key: str = Depends(require_api_key),
+) -> ProjectResponse:
+    """Clone or update the project's git repository."""
+    import os
+    from bugalizer.git_ops.repo import clone_repo, get_head_sha
+
+    project = project_get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    repo_url = project["repo_url"]
+    branch = project.get("default_branch", "main")
+    target_dir = os.path.join(settings.repos_dir, project_id)
+
+    try:
+        repo_path = await asyncio.to_thread(clone_repo, repo_url, target_dir, branch)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Get HEAD SHA and update project with repo_path + head_sha
+    head_sha = await asyncio.to_thread(get_head_sha, repo_path)
+    updated = project_update(project_id, repo_path=repo_path, head_sha=head_sha)
+    return _row_to_response(updated)
+
+
+@router.post("/projects/{project_id}/refresh-map")
+async def refresh_repo_map(
+    project_id: str,
+    _key: str = Depends(require_api_key),
+) -> RepoMapResponse:
+    """Force rebuild the project's repo map (pulls latest + re-parses)."""
+    from bugalizer.git_ops.repo import pull_repo
+    from bugalizer.pipeline.repo_map import build_repo_map, get_repo_map_cache
+
+    project = project_get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not project.get("repo_path"):
+        raise HTTPException(status_code=400, detail="Project repo not cloned. Run POST /clone first.")
+
+    repo_path = project["repo_path"]
+    branch = project.get("default_branch", "main")
+
+    # Pull latest changes
+    try:
+        await asyncio.to_thread(pull_repo, repo_path)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=f"git pull failed: {e}")
+
+    # Rebuild map (bypasses cache)
+    repo_map = await asyncio.to_thread(build_repo_map, project_id, branch, repo_path)
+
+    # Update project head_sha to reflect pulled state
+    project_update(project_id, head_sha=repo_map.sha)
+
+    # Store in cache
+    cache = get_repo_map_cache()
+    cache.put(repo_map)
+
+    return RepoMapResponse(
+        project_id=project_id,
+        branch=branch,
+        sha=repo_map.sha,
+        file_count=len(repo_map.files),
+        text=repo_map.text,
+    )
+
+
+@router.get("/projects/{project_id}/repo-map")
+async def get_repo_map(
+    project_id: str,
+    _key: str = Depends(require_api_key),
+) -> RepoMapResponse:
+    """Get the current repo map for a project."""
+    from bugalizer.pipeline.repo_map import get_repo_map_cache
+
+    project = project_get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not project.get("repo_path"):
+        raise HTTPException(status_code=400, detail="Project repo not cloned. Run POST /clone first.")
+
+    repo_path = project["repo_path"]
+    branch = project.get("default_branch", "main")
+
+    cache = get_repo_map_cache()
+    repo_map = await asyncio.to_thread(cache.get_or_build, project_id, branch, repo_path)
+
+    return RepoMapResponse(
+        project_id=project_id,
+        branch=branch,
+        sha=repo_map.sha,
+        file_count=len(repo_map.files),
+        text=repo_map.text,
+    )

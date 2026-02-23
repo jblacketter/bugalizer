@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 320">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1e293b;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#3b82f6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#8b5cf6;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="green" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#22c55e;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#10b981;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="320" rx="12" fill="url(#bg)"/>
+  <rect x="0" y="308" width="900" height="12" rx="0" fill="url(#accent)" opacity="0.6"/>
+
+  <!-- Bug icon -->
+  <g transform="translate(60, 80)">
+    <!-- Bug body -->
+    <ellipse cx="50" cy="70" rx="30" ry="38" fill="#3b82f6" opacity="0.9"/>
+    <ellipse cx="50" cy="30" rx="20" ry="22" fill="#3b82f6" opacity="0.9"/>
+    <!-- Eyes -->
+    <circle cx="42" cy="26" r="5" fill="#0f172a"/>
+    <circle cx="58" cy="26" r="5" fill="#0f172a"/>
+    <circle cx="43" cy="25" r="2" fill="#fff"/>
+    <circle cx="59" cy="25" r="2" fill="#fff"/>
+    <!-- Antennae -->
+    <line x1="38" y1="12" x2="28" y2="-5" stroke="#60a5fa" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="62" y1="12" x2="72" y2="-5" stroke="#60a5fa" stroke-width="2.5" stroke-linecap="round"/>
+    <circle cx="28" cy="-5" r="4" fill="#60a5fa"/>
+    <circle cx="72" cy="-5" r="4" fill="#60a5fa"/>
+    <!-- Legs -->
+    <line x1="22" y1="50" x2="5" y2="40" stroke="#60a5fa" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="22" y1="70" x2="2" y2="70" stroke="#60a5fa" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="22" y1="90" x2="5" y2="100" stroke="#60a5fa" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="78" y1="50" x2="95" y2="40" stroke="#60a5fa" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="78" y1="70" x2="98" y2="70" stroke="#60a5fa" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="78" y1="90" x2="95" y2="100" stroke="#60a5fa" stroke-width="2.5" stroke-linecap="round"/>
+    <!-- Magnifying glass overlay -->
+    <circle cx="70" cy="85" r="18" fill="none" stroke="#fbbf24" stroke-width="3" opacity="0.8"/>
+    <line x1="83" y1="98" x2="95" y2="112" stroke="#fbbf24" stroke-width="3.5" stroke-linecap="round" opacity="0.8"/>
+  </g>
+
+  <!-- Title -->
+  <text x="195" y="115" font-family="system-ui, -apple-system, sans-serif" font-size="52" font-weight="700" fill="#f8fafc">Bugalizer</text>
+
+  <!-- Subtitle -->
+  <text x="195" y="150" font-family="system-ui, -apple-system, sans-serif" font-size="18" fill="#94a3b8">AI-Powered Bug Report Processing Server</text>
+
+  <!-- Pipeline flow -->
+  <g transform="translate(195, 178)">
+    <!-- Stage boxes -->
+    <rect x="0" y="0" width="105" height="34" rx="6" fill="#1e3a5f" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="52" y="22" font-family="monospace" font-size="12" fill="#93c5fd" text-anchor="middle">Submit</text>
+
+    <text x="118" y="22" font-family="monospace" font-size="16" fill="#475569">&#8594;</text>
+
+    <rect x="135" y="0" width="105" height="34" rx="6" fill="#1e3a5f" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="187" y="22" font-family="monospace" font-size="12" fill="#93c5fd" text-anchor="middle">Validate</text>
+
+    <text x="253" y="22" font-family="monospace" font-size="16" fill="#475569">&#8594;</text>
+
+    <rect x="270" y="0" width="105" height="34" rx="6" fill="#1e3a5f" stroke="#8b5cf6" stroke-width="1.5"/>
+    <text x="322" y="22" font-family="monospace" font-size="12" fill="#c4b5fd" text-anchor="middle">Triage (LLM)</text>
+
+    <text x="388" y="22" font-family="monospace" font-size="16" fill="#475569">&#8594;</text>
+
+    <rect x="405" y="0" width="105" height="34" rx="6" fill="#1e3a5f" stroke="#8b5cf6" stroke-width="1.5"/>
+    <text x="457" y="22" font-family="monospace" font-size="12" fill="#c4b5fd" text-anchor="middle">Localize</text>
+
+    <text x="523" y="22" font-family="monospace" font-size="16" fill="#475569">&#8594;</text>
+
+    <rect x="540" y="0" width="105" height="34" rx="6" fill="#1e3a5f" stroke="#22c55e" stroke-width="1.5"/>
+    <text x="592" y="22" font-family="monospace" font-size="12" fill="#86efac" text-anchor="middle">Fix (AI)</text>
+  </g>
+
+  <!-- Tech badges -->
+  <g transform="translate(195, 240)">
+    <rect x="0" y="0" width="72" height="24" rx="4" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+    <text x="36" y="16" font-family="monospace" font-size="11" fill="#94a3b8" text-anchor="middle">FastAPI</text>
+
+    <rect x="82" y="0" width="62" height="24" rx="4" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+    <text x="113" y="16" font-family="monospace" font-size="11" fill="#94a3b8" text-anchor="middle">SQLite</text>
+
+    <rect x="154" y="0" width="65" height="24" rx="4" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+    <text x="186" y="16" font-family="monospace" font-size="11" fill="#94a3b8" text-anchor="middle">Ollama</text>
+
+    <rect x="229" y="0" width="88" height="24" rx="4" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+    <text x="273" y="16" font-family="monospace" font-size="11" fill="#94a3b8" text-anchor="middle">tree-sitter</text>
+
+    <rect x="327" y="0" width="62" height="24" rx="4" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+    <text x="358" y="16" font-family="monospace" font-size="11" fill="#94a3b8" text-anchor="middle">litellm</text>
+
+    <rect x="399" y="0" width="72" height="24" rx="4" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+    <text x="435" y="16" font-family="monospace" font-size="11" fill="#94a3b8" text-anchor="middle">Python</text>
+  </g>
+
+  <!-- Version badge -->
+  <g transform="translate(780, 20)">
+    <rect x="0" y="0" width="100" height="24" rx="4" fill="url(#green)" opacity="0.2"/>
+    <text x="50" y="16" font-family="monospace" font-size="11" fill="#22c55e" text-anchor="middle">v0.1.0</text>
+  </g>
+</svg>

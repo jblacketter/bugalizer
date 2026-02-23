@@ -55,11 +55,15 @@ VALID_TRANSITIONS: dict[BugStatus, set[BugStatus]] = {
 }
 
 
-# Phase 1 only allows human/manual transitions. AI-driven states are gated
-# behind later phases. This set defines which statuses can be entered in Phase 1.
-PHASE1_ALLOWED_TARGETS: set[BugStatus] = {
+# Phase-gated transitions. This set defines which statuses can be entered
+# in the current phase. Updated each phase to unlock new states.
+# Phase 2: adds analyzing, clarification_needed (local LLM pipeline).
+# Still gated: fix_proposed, fix_approved, fix_committed, verified (Phase 3/4).
+CURRENT_PHASE_TARGETS: set[BugStatus] = {
     BugStatus.VALIDATING,
     BugStatus.TRIAGED,
+    BugStatus.ANALYZING,
+    BugStatus.CLARIFICATION_NEEDED,
     BugStatus.DEFERRED,
     BugStatus.DUPLICATE,
     BugStatus.CLOSED,
@@ -71,17 +75,17 @@ def validate_transition(
     current: BugStatus,
     target: BugStatus,
     *,
-    phase1_only: bool = True,
+    enforce_phase_gating: bool = True,
 ) -> bool:
     """Return True if the transition from current to target is valid.
 
-    When phase1_only is True (default), also checks that the target status
-    is in the Phase 1 allowed set (no AI-driven states).
+    When enforce_phase_gating is True (default), also checks that the target
+    status is in the current phase's allowed set.
     """
     allowed = VALID_TRANSITIONS.get(current, set())
     if target not in allowed:
         return False
-    if phase1_only and target not in PHASE1_ALLOWED_TARGETS:
+    if enforce_phase_gating and target not in CURRENT_PHASE_TARGETS:
         return False
     return True
 
@@ -208,3 +212,64 @@ class QueueOverview(BaseModel):
     """Status counts for the bug report queue."""
     total: int = 0
     by_status: dict[str, int] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Analysis models
+# ---------------------------------------------------------------------------
+
+class AnalysisResponse(BaseModel):
+    id: str
+    bug_report_id: str
+    phase: str
+    status: str
+    result: Optional[dict] = None
+    llm_provider: Optional[str] = None
+    llm_model: Optional[str] = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    created_at: str
+
+
+# ---------------------------------------------------------------------------
+# Usage models
+# ---------------------------------------------------------------------------
+
+class UsageSummary(BaseModel):
+    """Token usage summary."""
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_estimated_cost_usd: float = 0.0
+    by_provider: dict[str, dict] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Repo map models
+# ---------------------------------------------------------------------------
+
+class RepoMapResponse(BaseModel):
+    """API response for a repo map."""
+    project_id: str
+    branch: str
+    sha: str
+    file_count: int = 0
+    text: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Localization models
+# ---------------------------------------------------------------------------
+
+class LocalizationResponse(BaseModel):
+    """API response for localization results."""
+    analysis_id: str
+    bug_report_id: str
+    status: str
+    repo_sha: Optional[str] = None
+    candidate_files: list[dict] = Field(default_factory=list)
+    localizations: list[dict] = Field(default_factory=list)
+    root_cause_hypothesis: Optional[str] = None
+    confidence: float = 0.0

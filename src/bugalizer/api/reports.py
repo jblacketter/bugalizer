@@ -7,6 +7,7 @@ from typing import Optional
 
 from bugalizer.auth import require_api_key
 from bugalizer.db import (
+    analyses_for_report,
     project_exists,
     report_create,
     report_delete,
@@ -19,6 +20,7 @@ from bugalizer.models import (
     BugReportListResponse,
     BugReportResponse,
     BugStatus,
+    LocalizationResponse,
     StatusUpdateRequest,
     StatusUpdateResponse,
     TERMINAL_STATUSES,
@@ -150,7 +152,7 @@ def update_report_status(
             detail=f"Cannot transition from terminal status '{current.value}'",
         )
 
-    if not validate_transition(current, target):
+    if not validate_transition(current, target, enforce_phase_gating=True):
         raise HTTPException(
             status_code=409,
             detail=f"Invalid transition: '{current.value}' → '{target.value}'",
@@ -168,6 +170,39 @@ def update_report_status(
         previous_status=current.value,
         new_status=target.value,
         resolution_reason=body.resolution_reason,
+    )
+
+
+@router.get("/reports/{report_id}/localization")
+def get_localization(
+    report_id: str,
+    _key: str = Depends(require_api_key),
+) -> LocalizationResponse:
+    """Get localization results for a report."""
+    row = report_get(report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Bug report not found")
+
+    analyses = analyses_for_report(report_id, phase="localization")
+    if not analyses:
+        raise HTTPException(status_code=404, detail="No localization results found")
+
+    # Return the most recent localization
+    latest = analyses[0]
+    result = latest.get("result") or {}
+
+    pass1 = result.get("pass1", {})
+    pass2 = result.get("pass2")
+
+    return LocalizationResponse(
+        analysis_id=latest["id"],
+        bug_report_id=report_id,
+        status=latest["status"],
+        repo_sha=result.get("repo_sha"),
+        candidate_files=pass1.get("candidate_files", []),
+        localizations=pass2.get("localizations", []) if pass2 else [],
+        root_cause_hypothesis=pass2.get("root_cause_hypothesis") if pass2 else None,
+        confidence=pass1.get("confidence", 0),
     )
 
 

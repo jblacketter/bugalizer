@@ -24,6 +24,32 @@ class Settings(BaseSettings):
 
     # Ollama
     ollama_host: str = "http://localhost:11434"
+    default_triage_model: str = "qwen2.5-coder:7b"
+
+    # Queue worker
+    queue_poll_seconds: int = 5
+    queue_max_concurrent: int = 2
+    queue_enabled: bool = True
+
+    # Pipeline
+    duplicate_threshold: float = 0.8
+    retry_delay_seconds: int = 60
+    max_triage_retries: int = 3
+
+    # Git repos
+    repos_dir: str = "./repos"
+
+    # Cache
+    cache_dir: str = "./cache"
+
+    # Localization (Stage 3)
+    default_localize_model: str = "qwen2.5-coder:7b"
+    repo_map_max_files: int = 50
+    repo_map_max_tokens: int = 4000
+    repo_map_ttl_hours: int = 24
+    localize_max_file_chars: int = 8000
+    localize_max_files: int = 3
+    localize_confidence_threshold: float = 0.5
 
     # Encryption key for stored LLM API keys (Fernet, base64-encoded 32 bytes).
     secret_key: str = ""

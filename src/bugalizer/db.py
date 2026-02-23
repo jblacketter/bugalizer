@@ -2,15 +2,50 @@
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
+import logging
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar
 
 from bugalizer.config import settings
 
+logger = logging.getLogger(__name__)
+
 _conn: Optional[sqlite3.Connection] = None
+
+# Async lock for serializing DB writes from queue workers.
+db_write_lock = asyncio.Lock()
+
+T = TypeVar("T")
+
+
+def retry_on_locked(fn: Callable[..., T]) -> Callable[..., T]:
+    """Decorator: retry a DB function up to 3 times on sqlite3.OperationalError.
+
+    Uses exponential backoff: 0.1s, 0.2s, 0.4s.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> T:
+        delays = [0.1, 0.2, 0.4]
+        for attempt in range(len(delays) + 1):
+            try:
+                return fn(*args, **kwargs)
+            except sqlite3.OperationalError as e:
+                if "database is locked" not in str(e) or attempt == len(delays):
+                    raise
+                delay = delays[attempt]
+                logger.warning(
+                    "DB locked in %s (attempt %d/%d), retrying in %.1fs",
+                    fn.__name__, attempt + 1, len(delays) + 1, delay,
+                )
+                time.sleep(delay)
+        raise RuntimeError("unreachable")  # pragma: no cover
+    return wrapper
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -24,9 +59,20 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Create tables if they don't exist."""
+    """Create tables if they don't exist, then apply any pending migrations."""
     conn = _get_conn()
     conn.executescript(_SCHEMA)
+    _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Apply lightweight schema migrations for columns added after initial release."""
+    # Phase 3: projects.head_sha (added for localization freshness tracking)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
+    if "head_sha" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN head_sha TEXT")
+        conn.commit()
+        logger.info("Migration: added projects.head_sha column")
 
 
 def _now() -> str:
@@ -47,6 +93,7 @@ CREATE TABLE IF NOT EXISTS projects (
     name TEXT NOT NULL,
     repo_url TEXT NOT NULL,
     repo_path TEXT,
+    head_sha TEXT,
     default_branch TEXT DEFAULT 'main',
     llm_provider TEXT DEFAULT 'ollama',
     llm_model TEXT DEFAULT 'qwen2.5-coder:7b',
@@ -302,6 +349,7 @@ def report_list(
     return [_report_row_to_dict(r) for r in conn.execute(query, params).fetchall()]
 
 
+@retry_on_locked
 def report_update_status(
     report_id: str,
     new_status: str,
@@ -351,3 +399,341 @@ def queue_counts(project_id: Optional[str] = None) -> dict[str, int]:
     query += " GROUP BY status"
     rows = conn.execute(query, params).fetchall()
     return {row["status"]: row["cnt"] for row in rows}
+
+
+# ---------------------------------------------------------------------------
+# Atomic claim for queue workers
+# ---------------------------------------------------------------------------
+
+@retry_on_locked
+def try_claim_report(report_id: str, expected_status: str, new_status: str) -> bool:
+    """Atomically claim a report by transitioning its status.
+
+    Returns True only if this caller won the claim (rowcount == 1).
+    """
+    conn = _get_conn()
+    now = _now()
+    cursor = conn.execute(
+        "UPDATE bug_reports SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+        (new_status, now, report_id, expected_status),
+    )
+    conn.commit()
+    return cursor.rowcount == 1
+
+
+@retry_on_locked
+def report_update_fields(report_id: str, **fields: Any) -> Optional[dict[str, Any]]:
+    """Update arbitrary fields on a bug report."""
+    conn = _get_conn()
+    fields["updated_at"] = _now()
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [report_id]
+    conn.execute(f"UPDATE bug_reports SET {set_clause} WHERE id = ?", values)
+    conn.commit()
+    return report_get(report_id)
+
+
+# ---------------------------------------------------------------------------
+# Analyses
+# ---------------------------------------------------------------------------
+
+@retry_on_locked
+def analysis_create(
+    bug_report_id: str,
+    phase: str,
+    status: str = "pending",
+    *,
+    result: Optional[dict] = None,
+    llm_provider: Optional[str] = None,
+    llm_model: Optional[str] = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    estimated_cost_usd: float = 0.0,
+    started_at: Optional[str] = None,
+    completed_at: Optional[str] = None,
+) -> dict[str, Any]:
+    conn = _get_conn()
+    row_id = _new_id()
+    now = _now()
+    conn.execute(
+        """INSERT INTO analyses
+           (id, bug_report_id, phase, status, result,
+            llm_provider, llm_model, prompt_tokens, completion_tokens,
+            estimated_cost_usd, started_at, completed_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            row_id, bug_report_id, phase, status,
+            json.dumps(result) if result else None,
+            llm_provider, llm_model, prompt_tokens, completion_tokens,
+            estimated_cost_usd, started_at, completed_at, now,
+        ),
+    )
+    conn.commit()
+    return _analysis_row_to_dict(
+        conn.execute("SELECT * FROM analyses WHERE id = ?", (row_id,)).fetchone()
+    )
+
+
+def _analysis_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    d = dict(row)
+    if d.get("result"):
+        d["result"] = json.loads(d["result"])
+    return d
+
+
+@retry_on_locked
+def analysis_update(analysis_id: str, **fields: Any) -> Optional[dict[str, Any]]:
+    conn = _get_conn()
+    if "result" in fields and isinstance(fields["result"], dict):
+        fields["result"] = json.dumps(fields["result"])
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [analysis_id]
+    conn.execute(f"UPDATE analyses SET {set_clause} WHERE id = ?", values)
+    conn.commit()
+    row = conn.execute("SELECT * FROM analyses WHERE id = ?", (analysis_id,)).fetchone()
+    return _analysis_row_to_dict(row) if row else None
+
+
+def analysis_get(analysis_id: str) -> Optional[dict[str, Any]]:
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM analyses WHERE id = ?", (analysis_id,)).fetchone()
+    return _analysis_row_to_dict(row) if row else None
+
+
+def analyses_for_report(bug_report_id: str, phase: Optional[str] = None) -> list[dict[str, Any]]:
+    conn = _get_conn()
+    query = "SELECT * FROM analyses WHERE bug_report_id = ?"
+    params: list[Any] = [bug_report_id]
+    if phase:
+        query += " AND phase = ?"
+        params.append(phase)
+    query += " ORDER BY created_at DESC"
+    return [_analysis_row_to_dict(r) for r in conn.execute(query, params).fetchall()]
+
+
+def triage_eligible_reports() -> list[dict[str, Any]]:
+    """Return triaged reports eligible for Stage 2 triage processing.
+
+    Eligible when:
+    - No triage analysis with status='completed' exists
+    - Either no triage analysis at all, or most recent failed triage is
+      past the retry delay and retry count < max retries
+    """
+    conn = _get_conn()
+    max_retries = settings.max_triage_retries
+    retry_delay = settings.retry_delay_seconds
+
+    # Get all triaged, non-deleted reports
+    reports = [
+        _report_row_to_dict(r) for r in conn.execute(
+            """SELECT * FROM bug_reports
+               WHERE status = 'triaged'
+               AND (resolution_reason IS NULL OR resolution_reason != 'deleted')
+               ORDER BY created_at ASC"""
+        ).fetchall()
+    ]
+
+    eligible = []
+    now = datetime.now(timezone.utc)
+    for report in reports:
+        triage_rows = conn.execute(
+            """SELECT status, completed_at FROM analyses
+               WHERE bug_report_id = ? AND phase = 'triage'
+               ORDER BY created_at DESC""",
+            (report["id"],),
+        ).fetchall()
+
+        if not triage_rows:
+            # Never attempted — eligible
+            eligible.append(report)
+            continue
+
+        # Check if any completed successfully
+        if any(r["status"] == "completed" for r in triage_rows):
+            continue  # Already triaged
+
+        # Count failed attempts
+        failed_count = sum(1 for r in triage_rows if r["status"] == "failed")
+        if failed_count >= max_retries:
+            continue  # Max retries exceeded
+
+        # Check retry delay on most recent failure
+        latest = triage_rows[0]
+        if latest["status"] == "failed" and latest["completed_at"]:
+            completed = datetime.fromisoformat(latest["completed_at"])
+            elapsed = (now - completed).total_seconds()
+            if elapsed < retry_delay:
+                continue  # Within retry delay window
+
+        eligible.append(report)
+
+    return eligible
+
+
+def submitted_reports() -> list[dict[str, Any]]:
+    """Return reports in 'submitted' status ready for Stage 1."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """SELECT * FROM bug_reports
+           WHERE status = 'submitted'
+           AND (resolution_reason IS NULL OR resolution_reason != 'deleted')
+           ORDER BY created_at ASC"""
+    ).fetchall()
+    return [_report_row_to_dict(r) for r in rows]
+
+
+def localization_eligible_reports() -> list[dict[str, Any]]:
+    """Return triaged reports eligible for Stage 3 localization.
+
+    Eligible when:
+    - Report is triaged
+    - Has a completed triage analysis
+    - Project has repo_path set (repo cloned)
+    - Either no completed localization analysis, or latest completed
+      localization's repo_sha differs from project.head_sha
+    """
+    conn = _get_conn()
+
+    # Get triaged reports with completed triage and project with repo_path
+    rows = conn.execute(
+        """SELECT br.*, p.repo_path, p.default_branch, p.head_sha AS project_head_sha
+           FROM bug_reports br
+           JOIN projects p ON br.project_id = p.id
+           WHERE br.status = 'triaged'
+           AND p.repo_path IS NOT NULL
+           AND (br.resolution_reason IS NULL OR br.resolution_reason != 'deleted')
+           AND EXISTS (
+               SELECT 1 FROM analyses a
+               WHERE a.bug_report_id = br.id
+               AND a.phase = 'triage' AND a.status = 'completed'
+           )
+           ORDER BY br.created_at ASC"""
+    ).fetchall()
+
+    eligible = []
+    for row in rows:
+        report = _report_row_to_dict(row)
+        report["_repo_path"] = row["repo_path"]
+        report["_default_branch"] = row["default_branch"]
+        project_head_sha = row["project_head_sha"]
+
+        # Check localization state
+        loc_rows = conn.execute(
+            """SELECT result FROM analyses
+               WHERE bug_report_id = ? AND phase = 'localization' AND status = 'completed'
+               ORDER BY created_at DESC LIMIT 1""",
+            (report["id"],),
+        ).fetchall()
+
+        if not loc_rows:
+            # Never localized — eligible
+            eligible.append(report)
+            continue
+
+        # Has completed localization — compare repo_sha against project.head_sha
+        if not project_head_sha:
+            # Project has no known HEAD SHA yet — skip (will be set on next clone/refresh)
+            continue
+
+        try:
+            result_json = loc_rows[0]["result"]
+            if result_json:
+                result = json.loads(result_json)
+                loc_sha = result.get("repo_sha")
+                if loc_sha == project_head_sha:
+                    # Localization is fresh — skip
+                    continue
+                # SHA differs — stale localization, re-eligible
+                eligible.append(report)
+            else:
+                eligible.append(report)
+        except (json.JSONDecodeError, KeyError):
+            eligible.append(report)
+
+    return eligible
+
+
+def reset_triage_retries(bug_report_id: str) -> bool:
+    """Delete failed triage analyses for a report, making it eligible for retry."""
+    conn = _get_conn()
+    cursor = conn.execute(
+        "DELETE FROM analyses WHERE bug_report_id = ? AND phase = 'triage' AND status = 'failed'",
+        (bug_report_id,),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Token usage
+# ---------------------------------------------------------------------------
+
+@retry_on_locked
+def token_usage_create(
+    project_id: str,
+    provider: str,
+    model: str,
+    *,
+    bug_report_id: Optional[str] = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    estimated_cost_usd: float = 0.0,
+) -> dict[str, Any]:
+    conn = _get_conn()
+    now = _now()
+    conn.execute(
+        """INSERT INTO token_usage
+           (project_id, bug_report_id, provider, model,
+            prompt_tokens, completion_tokens, estimated_cost_usd, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (project_id, bug_report_id, provider, model,
+         prompt_tokens, completion_tokens, estimated_cost_usd, now),
+    )
+    conn.commit()
+    return {
+        "project_id": project_id,
+        "provider": provider,
+        "model": model,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "estimated_cost_usd": estimated_cost_usd,
+    }
+
+
+def token_usage_summary(project_id: Optional[str] = None) -> dict[str, Any]:
+    """Aggregate token usage, optionally filtered by project."""
+    conn = _get_conn()
+    query = """SELECT provider, model,
+               SUM(prompt_tokens) as total_prompt,
+               SUM(completion_tokens) as total_completion,
+               SUM(estimated_cost_usd) as total_cost
+               FROM token_usage"""
+    params: list[Any] = []
+    if project_id:
+        query += " WHERE project_id = ?"
+        params.append(project_id)
+    query += " GROUP BY provider, model"
+    rows = conn.execute(query, params).fetchall()
+
+    total_prompt = 0
+    total_completion = 0
+    total_cost = 0.0
+    by_provider: dict[str, dict] = {}
+
+    for row in rows:
+        total_prompt += row["total_prompt"]
+        total_completion += row["total_completion"]
+        total_cost += row["total_cost"]
+        key = f"{row['provider']}/{row['model']}"
+        by_provider[key] = {
+            "prompt_tokens": row["total_prompt"],
+            "completion_tokens": row["total_completion"],
+            "estimated_cost_usd": row["total_cost"],
+        }
+
+    return {
+        "total_prompt_tokens": total_prompt,
+        "total_completion_tokens": total_completion,
+        "total_estimated_cost_usd": total_cost,
+        "by_provider": by_provider,
+    }

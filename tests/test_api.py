@@ -1,11 +1,12 @@
-"""Tests for the Bugalizer Phase 1 API."""
+"""Tests for the Bugalizer API."""
 
 import os
 import pytest
 from fastapi.testclient import TestClient
 
-# Use in-memory DB for tests.
+# Use in-memory DB for tests and disable queue worker.
 os.environ["BUGALIZER_DB_PATH"] = ":memory:"
+os.environ["BUGALIZER_QUEUE_ENABLED"] = "false"
 
 from bugalizer.main import app
 from bugalizer.db import init_db
@@ -19,6 +20,7 @@ def fresh_db():
     os.environ["BUGALIZER_DB_PATH"] = ":memory:"
     from bugalizer.config import settings
     settings.db_path = ":memory:"
+    settings.queue_enabled = False
     init_db()
     yield
 
@@ -250,18 +252,29 @@ def test_invalid_transition():
     assert r.status_code == 409
 
 
-def test_phase1_blocks_analyzing():
-    """Phase 1 gates AI-driven transitions: triaged -> analyzing is rejected."""
+def test_phase2_allows_analyzing():
+    """Phase 2 unlocks triaged -> analyzing."""
     pid = _create_project().json()["id"]
     rid = _create_report(pid).json()["id"]
     _transition(rid, "triaged")
     r = _transition(rid, "analyzing")
-    assert r.status_code == 409
-    assert "invalid transition" in r.json()["detail"].lower()
+    assert r.status_code == 200
+    assert r.json()["new_status"] == "analyzing"
 
 
-def test_phase1_blocks_fix_proposed():
-    """Phase 1 gates AI-driven transitions: cannot reach fix_proposed."""
+def test_phase2_allows_clarification_needed():
+    """Phase 2 unlocks analyzing -> clarification_needed."""
+    pid = _create_project().json()["id"]
+    rid = _create_report(pid).json()["id"]
+    _transition(rid, "triaged")
+    _transition(rid, "analyzing")
+    r = _transition(rid, "clarification_needed")
+    assert r.status_code == 200
+    assert r.json()["new_status"] == "clarification_needed"
+
+
+def test_phase2_blocks_fix_proposed():
+    """Phase 2 still gates fix_proposed (Phase 3/4)."""
     pid = _create_project().json()["id"]
     rid = _create_report(pid).json()["id"]
     _transition(rid, "triaged")
@@ -269,34 +282,24 @@ def test_phase1_blocks_fix_proposed():
     assert r.status_code == 409
 
 
-def test_phase1_blocks_fix_approved():
-    """Phase 1 gates AI-driven transitions: cannot reach fix_approved."""
+def test_phase2_blocks_fix_approved():
+    """Phase 2 still gates fix_approved (Phase 3/4)."""
     pid = _create_project().json()["id"]
     rid = _create_report(pid).json()["id"]
-    # Even if we could get to fix_proposed (we can't), fix_approved is blocked
     r = _transition(rid, "fix_approved")
     assert r.status_code == 409
 
 
-def test_phase1_blocks_fix_committed():
-    """Phase 1 gates AI-driven transitions: cannot reach fix_committed."""
+def test_phase2_blocks_fix_committed():
+    """Phase 2 still gates fix_committed (Phase 3/4)."""
     pid = _create_project().json()["id"]
     rid = _create_report(pid).json()["id"]
     r = _transition(rid, "fix_committed")
     assert r.status_code == 409
 
 
-def test_phase1_blocks_clarification_needed():
-    """Phase 1 gates AI-driven transitions: cannot reach clarification_needed."""
-    pid = _create_project().json()["id"]
-    rid = _create_report(pid).json()["id"]
-    _transition(rid, "triaged")
-    r = _transition(rid, "clarification_needed")
-    assert r.status_code == 409
-
-
-def test_phase1_blocks_verified():
-    """Phase 1 gates AI-driven transitions: cannot reach verified."""
+def test_phase2_blocks_verified():
+    """Phase 2 still gates verified (Phase 3/4)."""
     pid = _create_project().json()["id"]
     rid = _create_report(pid).json()["id"]
     r = _transition(rid, "verified")
