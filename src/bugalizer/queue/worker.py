@@ -6,8 +6,18 @@ import asyncio
 import logging
 
 from bugalizer.config import settings
-from bugalizer.db import submitted_reports, triage_eligible_reports, localization_eligible_reports
-from bugalizer.pipeline.orchestrator import process_submitted, process_triaged, process_localization
+from bugalizer.db import (
+    localization_eligible_reports,
+    reports_eligible_for_fix,
+    submitted_reports,
+    triage_eligible_reports,
+)
+from bugalizer.pipeline.orchestrator import (
+    process_fix_proposal,
+    process_localization,
+    process_submitted,
+    process_triaged,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +65,14 @@ async def _poll_loop() -> None:
             for report in localization_eligible_reports():
                 task = asyncio.create_task(
                     _process_with_semaphore(semaphore, process_localization(report["id"]))
+                )
+                tasks.append(task)
+
+            # Stage 4: fix-proposal-eligible reports (triaged + completed
+            # localization + no fix proposal yet) — dispatch concurrently.
+            for report in reports_eligible_for_fix():
+                task = asyncio.create_task(
+                    _process_with_semaphore(semaphore, process_fix_proposal(report["id"]))
                 )
                 tasks.append(task)
 

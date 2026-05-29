@@ -26,7 +26,7 @@ Report stored in DB, status tracked through 13-state workflow
 
 **Stage 3 — Localize** (Ollama): Builds an AST-based repo map using tree-sitter, sends it with the bug report to the LLM to identify candidate source files. A confirmation pass reads the actual file contents to pinpoint specific functions and line ranges.
 
-**Stage 4 — Fix** (planned): Will use cloud LLMs to generate fix proposals with diffs.
+**Stage 4 — Fix** (Anthropic via litellm): Takes a triaged report with a completed localization analysis, reads the candidate file contents (bounded by size caps), calls Claude with a fix-proposal prompt (system prompt marked for prompt caching), and persists a unified-diff fix proposal (root cause + explanation + confidence + files_changed) to the `fix_proposals` table. Transitions `TRIAGED → FIX_PROPOSING → FIX_PROPOSED` with retry-safe `FIX_PROPOSING → TRIAGED` on any failure. Read-only API at `GET /api/v1/reports/{id}/fix_proposals`.
 
 ## Features
 
@@ -120,6 +120,12 @@ All settings use the `BUGALIZER_` environment variable prefix:
 | `BUGALIZER_QUEUE_MAX_CONCURRENT` | `2` | Max concurrent pipeline tasks |
 | `BUGALIZER_DUPLICATE_THRESHOLD` | `0.8` | Similarity threshold for duplicate detection |
 | `BUGALIZER_LOCALIZE_CONFIDENCE_THRESHOLD` | `0.5` | Min confidence for localization Pass 2 |
+| `BUGALIZER_DEFAULT_FIX_MODEL` | `claude-sonnet-4-6` | Cloud model for Stage 4 fix proposals |
+| `BUGALIZER_FIX_PROVIDER` | `anthropic` | Provider for Stage 4 (litellm routing) |
+| `BUGALIZER_ANTHROPIC_API_KEY` | _(unset; required for Stage 4)_ | Cloud API key for Anthropic |
+| `BUGALIZER_FIX_MAX_BUNDLE_BYTES` | `4194304` | Total file-bundle byte cap for Stage 4 |
+| `BUGALIZER_FIX_MAX_FILE_BYTES` | `524288` | Per-file byte cap for Stage 4 |
+| `BUGALIZER_FIX_ENABLE_PROMPT_CACHING` | `true` | Use Anthropic prompt caching for the fix-stage system prompt |
 
 ## API Endpoints
 

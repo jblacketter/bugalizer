@@ -348,3 +348,55 @@ def test_queue_overview():
     assert body["total"] == 3
     assert body["by_status"]["submitted"] == 2
     assert body["by_status"]["triaged"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Fix proposals endpoint (Stage 4 / Phase 4)
+# ---------------------------------------------------------------------------
+
+def test_list_fix_proposals_empty_when_no_proposals():
+    pid = _create_project().json()["id"]
+    rid = _create_report(pid).json()["id"]
+    r = client.get(f"/api/v1/reports/{rid}/fix_proposals")
+    assert r.status_code == 200
+    assert r.json() == {"fix_proposals": []}
+
+
+def test_list_fix_proposals_404_for_missing_report():
+    r = client.get("/api/v1/reports/does-not-exist/fix_proposals")
+    assert r.status_code == 404
+
+
+def test_list_fix_proposals_returns_persisted_rows(tmp_path):
+    """When a fix_proposal row has been written, the endpoint returns it."""
+    from bugalizer.db import analysis_create, fix_proposal_create
+
+    pid = _create_project().json()["id"]
+    rid = _create_report(pid).json()["id"]
+
+    # Seed a completed localization analysis + a fix_proposals row pointing at it.
+    analysis = analysis_create(
+        bug_report_id=rid,
+        phase="localization",
+        status="completed",
+        result={"candidate_files": [{"path": "x.py"}]},
+    )
+    fix_proposal_create(
+        bug_report_id=rid,
+        analysis_id=analysis["id"],
+        root_cause="rc",
+        explanation="ex",
+        diff="--- a/x.py\n+++ b/x.py\n@@\n- 1\n+ 2\n",
+        confidence=0.75,
+        files_changed=["x.py"],
+    )
+
+    r = client.get(f"/api/v1/reports/{rid}/fix_proposals")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["fix_proposals"]) == 1
+    row = body["fix_proposals"][0]
+    assert row["confidence"] == 0.75
+    assert row["files_changed"] == ["x.py"]
+    assert row["analysis_id"] == analysis["id"]
+    assert row["status"] == "proposed"

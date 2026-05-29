@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     # Encryption key for stored LLM API keys (Fernet, base64-encoded 32 bytes).
     secret_key: str = ""
 
+    # Fix proposals (Stage 4 / bugalizer Phase 4) — cloud LLM via litellm.
+    default_fix_model: str = "claude-sonnet-4-6"
+    fix_provider: str = "anthropic"
+    anthropic_api_key: str = ""
+    fix_max_bundle_bytes: int = 4_194_304   # 4 MiB total file-bundle cap
+    fix_max_file_bytes: int = 524_288       # 512 KiB per-file cap
+    fix_enable_prompt_caching: bool = True
+
     model_config = {"env_prefix": "BUGALIZER_"}
 
     def valid_api_keys(self) -> set[str]:

@@ -8,6 +8,7 @@ from typing import Optional
 from bugalizer.auth import require_api_key
 from bugalizer.db import (
     analyses_for_report,
+    fix_proposals_for_report,
     project_exists,
     report_create,
     report_delete,
@@ -204,6 +205,25 @@ def get_localization(
         root_cause_hypothesis=pass2.get("root_cause_hypothesis") if pass2 else None,
         confidence=pass1.get("confidence", 0),
     )
+
+
+@router.get("/reports/{report_id}/fix_proposals")
+def list_fix_proposals(
+    report_id: str,
+    _key: str = Depends(require_api_key),
+) -> dict:
+    """List fix proposals for a report, newest first.
+
+    Returns an object `{"fix_proposals": [...]}`. Each proposal includes
+    `id, analysis_id, root_cause, explanation, diff, confidence,
+    files_changed, status, created_at, updated_at` (and the nullable
+    review fields). Read-only; proposals are created by the Stage 4
+    pipeline.
+    """
+    row = report_get(report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Bug report not found")
+    return {"fix_proposals": fix_proposals_for_report(report_id)}
 
 
 @router.delete("/reports/{report_id}", status_code=204)

@@ -217,3 +217,82 @@ def test_retry_on_locked_ignores_other_errors():
 
     with pytest.raises(sqlite3.OperationalError, match="no such table"):
         fn()
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 eligibility (reports_eligible_for_fix)
+# ---------------------------------------------------------------------------
+
+def test_reports_eligible_for_fix_requires_completed_localization(tmp_path):
+    """Worker only picks up triaged reports with a completed localization
+    analysis AND no fix proposal for that analysis yet. Reports in
+    fix_proposing / fix_proposed are never re-picked up.
+    """
+    from bugalizer.db import (
+        analysis_create,
+        fix_proposal_create,
+        project_create,
+        project_update,
+        report_create,
+        reports_eligible_for_fix,
+        report_update_status,
+    )
+
+    # Fresh in-memory DB (autouse fixture above already handled it)
+    project = project_create(name="p", repo_url="https://example.com/r.git")
+    project_update(project["id"], repo_path=str(tmp_path))
+
+    # Case 1: triaged, no localization -> NOT eligible
+    r1 = report_create(project_id=project["id"], title="a", description="a",
+                      reporter="q@e.com", severity="low")
+    report_update_status(r1["id"], "triaged")
+
+    # Case 2: triaged + completed localization + no proposal -> eligible
+    r2 = report_create(project_id=project["id"], title="b", description="b",
+                      reporter="q@e.com", severity="low")
+    report_update_status(r2["id"], "triaged")
+    a2 = analysis_create(bug_report_id=r2["id"], phase="localization",
+                         status="completed", result={"x": 1})
+
+    # Case 3: triaged + completed localization + existing proposal -> NOT eligible
+    r3 = report_create(project_id=project["id"], title="c", description="c",
+                      reporter="q@e.com", severity="low")
+    report_update_status(r3["id"], "triaged")
+    a3 = analysis_create(bug_report_id=r3["id"], phase="localization",
+                         status="completed", result={"x": 1})
+    fix_proposal_create(
+        bug_report_id=r3["id"], analysis_id=a3["id"],
+        root_cause="rc", explanation="ex",
+        diff="--- a/x\n+++ b/x\n@@\n-1\n+2\n",
+        confidence=0.9, files_changed=["x"],
+    )
+
+    # Case 4: already in fix_proposing (claimed by another worker) -> NOT eligible
+    r4 = report_create(project_id=project["id"], title="d", description="d",
+                      reporter="q@e.com", severity="low")
+    report_update_status(r4["id"], "triaged")
+    analysis_create(bug_report_id=r4["id"], phase="localization",
+                    status="completed", result={"x": 1})
+    report_update_status(r4["id"], "fix_proposing")
+
+    # Case 5: already in fix_proposed -> NOT eligible
+    r5 = report_create(project_id=project["id"], title="e", description="e",
+                      reporter="q@e.com", severity="low")
+    report_update_status(r5["id"], "triaged")
+    a5 = analysis_create(bug_report_id=r5["id"], phase="localization",
+                         status="completed", result={"x": 1})
+    fix_proposal_create(
+        bug_report_id=r5["id"], analysis_id=a5["id"],
+        root_cause="rc", explanation="ex",
+        diff="--- a/x\n+++ b/x\n@@\n-1\n+2\n",
+        confidence=0.9, files_changed=["x"],
+    )
+    report_update_status(r5["id"], "fix_proposed")
+
+    eligible = reports_eligible_for_fix()
+    eligible_ids = {row["id"] for row in eligible}
+    assert r2["id"] in eligible_ids
+    assert r1["id"] not in eligible_ids
+    assert r3["id"] not in eligible_ids
+    assert r4["id"] not in eligible_ids
+    assert r5["id"] not in eligible_ids

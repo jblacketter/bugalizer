@@ -653,6 +653,113 @@ def localization_eligible_reports() -> list[dict[str, Any]]:
     return eligible
 
 
+# ---------------------------------------------------------------------------
+# Fix proposals (Stage 4 / bugalizer Phase 4)
+# ---------------------------------------------------------------------------
+
+@retry_on_locked
+def fix_proposal_create(
+    *,
+    bug_report_id: str,
+    analysis_id: Optional[str],
+    root_cause: str,
+    explanation: str,
+    diff: str,
+    confidence: float,
+    files_changed: list[str],
+) -> dict[str, Any]:
+    """Insert a new fix_proposals row and return the created record."""
+    conn = _get_conn()
+    row_id = _new_id()
+    now = _now()
+    conn.execute(
+        """INSERT INTO fix_proposals
+           (id, bug_report_id, analysis_id, branch_name, diff, explanation,
+            confidence, root_cause, files_changed, status, created_at, updated_at)
+           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, 'proposed', ?, ?)""",
+        (row_id, bug_report_id, analysis_id, diff, explanation,
+         confidence, root_cause, json.dumps(files_changed), now, now),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM fix_proposals WHERE id = ?", (row_id,)
+    ).fetchone()
+    return _fix_proposal_row_to_dict(row)
+
+
+def _fix_proposal_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    d = dict(row)
+    if d.get("files_changed"):
+        try:
+            d["files_changed"] = json.loads(d["files_changed"])
+        except json.JSONDecodeError:
+            pass
+    return d
+
+
+def fix_proposals_for_report(bug_report_id: str) -> list[dict[str, Any]]:
+    """Return all fix_proposals rows for a report, newest first."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """SELECT * FROM fix_proposals
+           WHERE bug_report_id = ?
+           ORDER BY created_at DESC""",
+        (bug_report_id,),
+    ).fetchall()
+    return [_fix_proposal_row_to_dict(r) for r in rows]
+
+
+def reports_eligible_for_fix() -> list[dict[str, Any]]:
+    """Return reports eligible for Stage 4 (fix proposal generation).
+
+    Eligible when:
+    - Report is in status `triaged`.
+    - Has at least one completed localization analysis.
+    - Does NOT yet have a fix_proposals row for its latest completed
+      localization analysis.
+    - Not soft-deleted.
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        """SELECT br.*
+           FROM bug_reports br
+           WHERE br.status = 'triaged'
+           AND (br.resolution_reason IS NULL OR br.resolution_reason != 'deleted')
+           AND EXISTS (
+               SELECT 1 FROM analyses a
+               WHERE a.bug_report_id = br.id
+               AND a.phase = 'localization' AND a.status = 'completed'
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM fix_proposals fp
+               JOIN analyses a ON fp.analysis_id = a.id
+               WHERE fp.bug_report_id = br.id
+               AND a.phase = 'localization' AND a.status = 'completed'
+               AND a.id = (
+                   SELECT id FROM analyses a2
+                   WHERE a2.bug_report_id = br.id
+                   AND a2.phase = 'localization' AND a2.status = 'completed'
+                   ORDER BY a2.created_at DESC LIMIT 1
+               )
+           )
+           ORDER BY br.created_at ASC"""
+    ).fetchall()
+    return [_report_row_to_dict(r) for r in rows]
+
+
+def latest_completed_localization(bug_report_id: str) -> Optional[dict[str, Any]]:
+    """Return the newest completed localization analysis for a report, or None."""
+    conn = _get_conn()
+    row = conn.execute(
+        """SELECT * FROM analyses
+           WHERE bug_report_id = ?
+           AND phase = 'localization' AND status = 'completed'
+           ORDER BY created_at DESC LIMIT 1""",
+        (bug_report_id,),
+    ).fetchone()
+    return _analysis_row_to_dict(row) if row else None
+
+
 def reset_triage_retries(bug_report_id: str) -> bool:
     """Delete failed triage analyses for a report, making it eligible for retry."""
     conn = _get_conn()

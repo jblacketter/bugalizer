@@ -14,12 +14,18 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 class BugStatus(str, Enum):
-    """Canonical 13-state bug status workflow."""
+    """Canonical bug status workflow.
+
+    Phase 4 (Fix Proposals) adds `fix_proposing` as a transient claim state
+    between `triaged` (post-localization) and `fix_proposed` so the fix
+    stage can acquire exclusive access via a real compare-and-set.
+    """
     SUBMITTED = "submitted"
     VALIDATING = "validating"
     TRIAGED = "triaged"
     ANALYZING = "analyzing"
     CLARIFICATION_NEEDED = "clarification_needed"
+    FIX_PROPOSING = "fix_proposing"       # transient claim for the fix stage
     FIX_PROPOSED = "fix_proposed"
     FIX_APPROVED = "fix_approved"
     FIX_COMMITTED = "fix_committed"
@@ -37,12 +43,14 @@ VALID_TRANSITIONS: dict[BugStatus, set[BugStatus]] = {
     BugStatus.SUBMITTED: {BugStatus.VALIDATING, BugStatus.REJECTED, BugStatus.TRIAGED},
     BugStatus.VALIDATING: {BugStatus.TRIAGED, BugStatus.REJECTED},
     BugStatus.TRIAGED: {
-        BugStatus.ANALYZING, BugStatus.DEFERRED, BugStatus.DUPLICATE, BugStatus.CLOSED,
+        BugStatus.ANALYZING, BugStatus.FIX_PROPOSING,
+        BugStatus.DEFERRED, BugStatus.DUPLICATE, BugStatus.CLOSED,
     },
     BugStatus.ANALYZING: {
         BugStatus.CLARIFICATION_NEEDED, BugStatus.FIX_PROPOSED, BugStatus.TRIAGED,
     },
     BugStatus.CLARIFICATION_NEEDED: {BugStatus.ANALYZING, BugStatus.CLOSED},
+    BugStatus.FIX_PROPOSING: {BugStatus.FIX_PROPOSED, BugStatus.TRIAGED},
     BugStatus.FIX_PROPOSED: {BugStatus.FIX_APPROVED, BugStatus.TRIAGED, BugStatus.CLOSED},
     BugStatus.FIX_APPROVED: {BugStatus.FIX_COMMITTED},
     BugStatus.FIX_COMMITTED: {BugStatus.VERIFIED, BugStatus.TRIAGED},
@@ -58,12 +66,16 @@ VALID_TRANSITIONS: dict[BugStatus, set[BugStatus]] = {
 # Phase-gated transitions. This set defines which statuses can be entered
 # in the current phase. Updated each phase to unlock new states.
 # Phase 2: adds analyzing, clarification_needed (local LLM pipeline).
-# Still gated: fix_proposed, fix_approved, fix_committed, verified (Phase 3/4).
+# Phase 4: unlocks fix_proposing (transient claim) + fix_proposed
+#          (terminal-within-phase). Still gated: fix_approved, fix_committed,
+#          verified (future Dashboard phase).
 CURRENT_PHASE_TARGETS: set[BugStatus] = {
     BugStatus.VALIDATING,
     BugStatus.TRIAGED,
     BugStatus.ANALYZING,
     BugStatus.CLARIFICATION_NEEDED,
+    BugStatus.FIX_PROPOSING,
+    BugStatus.FIX_PROPOSED,
     BugStatus.DEFERRED,
     BugStatus.DUPLICATE,
     BugStatus.CLOSED,

@@ -15,6 +15,7 @@ from bugalizer.db import (
     report_update_status,
     try_claim_report,
 )
+from bugalizer.pipeline.fix_proposer import propose_fix
 from bugalizer.pipeline.triage import triage_report
 from bugalizer.pipeline.validator import validate_report
 
@@ -184,3 +185,15 @@ async def process_localization(report_id: str) -> None:
         logger.error("Localization failed for report %s: %s", report_id, e)
         async with db_write_lock:
             report_update_status(report_id, "triaged")
+
+
+async def process_fix_proposal(report_id: str) -> None:
+    """Stage 4 entry point — delegate to the fix-proposer stage.
+
+    The stage owns its own atomic claim (TRIAGED -> FIX_PROPOSING) and
+    its own success/failure state transitions. This wrapper exists so
+    orchestrator-family callers have a consistent `process_<stage>`
+    entry point, matching the shape of process_submitted / _triaged /
+    _localization.
+    """
+    await propose_fix(report_id)
