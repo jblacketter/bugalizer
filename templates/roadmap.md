@@ -5,7 +5,7 @@
 
 **Tech Stack:** [Technologies used]
 
-**Workflow:** Lead / Reviewer with Human Arbiter (see ai-handoff.yaml for agent configuration)
+**Workflow:** Lead / Reviewer with Human Arbiter (see tagteam.yaml for agent configuration)
 
 ## Phases
 
