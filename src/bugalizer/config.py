@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -63,6 +66,38 @@ class Settings(BaseSettings):
     fix_enable_prompt_caching: bool = True
 
     model_config = {"env_prefix": "BUGALIZER_"}
+
+    @model_validator(mode="after")
+    def _apply_generic_llm_fallbacks(self) -> "Settings":
+        """docs/llm-tiering.md: QA_LLM_* generic env as a fallback layer.
+
+        BUGALIZER_* settings (any source — env, .env, init kwargs) always
+        win; `model_fields_set` is the explicitly-configured check. The fix
+        model and provider fall back atomically — a pinned fix_provider
+        blocks the generic model so the two are never mismatched. Triage/
+        localize are local-only: they consume QA_LLM_MODEL only when it is
+        an `ollama/` string; a cloud model string leaves them untouched.
+        """
+        generic = os.environ.get("QA_LLM_MODEL")
+        if generic:
+            if (
+                "fix_provider" not in self.model_fields_set
+                and "default_fix_model" not in self.model_fields_set
+            ):
+                self.default_fix_model = generic
+                self.fix_provider = (
+                    generic.partition("/")[0] if "/" in generic else "openai"
+                )
+            if generic.startswith("ollama/"):
+                bare = generic.removeprefix("ollama/")
+                if "default_triage_model" not in self.model_fields_set:
+                    self.default_triage_model = bare
+                if "default_localize_model" not in self.model_fields_set:
+                    self.default_localize_model = bare
+        generic_base = os.environ.get("QA_LLM_API_BASE")
+        if generic_base and "ollama_host" not in self.model_fields_set:
+            self.ollama_host = generic_base
+        return self
 
     def valid_api_keys(self) -> set[str]:
         """Return the set of configured API keys (empty set = auth disabled)."""

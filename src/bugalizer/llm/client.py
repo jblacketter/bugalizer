@@ -83,7 +83,17 @@ async def complete(
             )
         kwargs["api_key"] = key
     else:
-        raise ValueError(f"Unknown provider: {provider!r}")
+        # docs/llm-tiering.md full-string passthrough: providers beyond
+        # ollama|anthropic route via the litellm model string verbatim;
+        # credentials come from provider-native env vars (litellm reads
+        # OPENAI_API_KEY etc. itself).
+        if model is None:
+            raise ValueError(
+                f"provider {provider!r} requires an explicit litellm model string"
+            )
+        resolved_model = model
+        if api_key:
+            kwargs["api_key"] = api_key
 
     kwargs["model"] = resolved_model
     logger.debug("LLM call: provider=%s model=%s messages=%d",
