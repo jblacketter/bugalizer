@@ -1,0 +1,19 @@
+{
+  "state": "in-progress",
+  "ready_for": "reviewer",
+  "round": 1,
+  "phase": "phase-4-fix-proposals",
+  "type": "impl",
+  "lead": "claude",
+  "reviewer": "codex",
+  "date": "2026-07-02",
+  "baseline": {
+    "sha": "62ba64deb94c9549f82c9e4b7a13da8ec4239bff",
+    "dirty_paths": [
+      "?? .tagteam/",
+      "?? docs/phases/phase-4-fix-proposals.md"
+    ],
+    "captured_at": "2026-07-02T22:33:42.288007+00:00",
+    "source": "impl-init-fallback"
+  }
+}
