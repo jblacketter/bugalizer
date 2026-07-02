@@ -60,7 +60,7 @@ tests/
 - **Phase 2 (Local LLM Pipeline): COMPLETE** — Ollama triage, async queue worker, duplicate detection, token tracking (66 tests)
 - **Phase 3 (Codebase Analysis): COMPLETE** — Git ops, tree-sitter repo maps, two-pass localization, SHA freshness
 - **Phase 4 (Fix Proposals): IMPLEMENTED — awaiting review** — Anthropic-via-litellm stage generates unified-diff fix proposals with prompt caching; new `FIX_PROPOSING` transient claim state; `GET /reports/{id}/fix_proposals` endpoint; 139 tests passing.
-- Phase 5 (Dashboard): NOT STARTED
+- Phase 5 (Deployment Readiness + Dashboard): PLANNED — see `docs/phases/phase-5-deployment-readiness.md`
 - Phase 6 (Integrations): NOT STARTED
 
 ## Handoff Workflow

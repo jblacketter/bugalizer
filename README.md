@@ -4,7 +4,7 @@
 
 # Bugalizer
 
-An AI-powered bug report processing server. Bugalizer accepts structured bug reports via REST API, queues them through a multi-stage AI pipeline, and progressively enriches them with automated triage, code localization, and (eventually) fix proposals.
+An AI-powered bug report processing server. Bugalizer accepts structured bug reports via REST API, queues them through a multi-stage AI pipeline, and progressively enriches them with automated triage, code localization, and fix proposals.
 
 ## How It Works
 
@@ -13,9 +13,9 @@ Bug reports flow through a tiered pipeline, each stage adding intelligence:
 ```
 Submit  -->  Validate  -->  Triage (LLM)  -->  Localize (LLM)  -->  Fix (AI)
   |             |               |                   |                  |
-  |        Extract data    Classify bug,       Find relevant      Generate fix
-  |        Detect dupes    set severity,       files/functions,   proposals
-  |                        identify area       root cause         (planned)
+  |        Extract data    Classify bug,       Find relevant      Generate
+  |        Detect dupes    set severity,       files/functions,   unified-diff
+  |                        identify area       root cause         fix proposals
   v                                            hypothesis
 Report stored in DB, status tracked through 13-state workflow
 ```
@@ -171,10 +171,10 @@ All settings use the `BUGALIZER_` environment variable prefix:
     |         REST API     Async poll loop    Stage 1: Validate
     |         Auth (key)   Semaphore bound    Stage 2: Triage (LLM)
     |         Validation   Retry/backoff      Stage 3: Localize (LLM)
-    |                                         Stage 4: Fix (planned)
+    |                                         Stage 4: Fix (Anthropic)
     |                                                |
     +--  SQLite (WAL mode)  <------------------------+
-         bug_reports, projects, analyses, token_usage
+         bug_reports, projects, analyses, fix_proposals, token_usage
 ```
 
 - **Standalone service** — no external dependencies except Ollama and Git
@@ -190,7 +190,7 @@ All settings use the `BUGALIZER_` environment variable prefix:
 | 1. Foundation | Complete | REST API, DB, auth, 13-state workflow |
 | 2. Local LLM Pipeline | Complete | Ollama triage, async queue, duplicate detection |
 | 3. Codebase Analysis | Complete | Git ops, repo maps, two-pass localization |
-| 4. Fix Proposals | Planned | Cloud LLM fix generation, diffs, PRs |
+| 4. Fix Proposals | Implemented — awaiting review | Anthropic-via-litellm unified-diff fix proposals |
 | 5. Dashboard | Planned | Web UI for monitoring and management |
 | 6. Integrations | Planned | Webhooks, external bug trackers |
 

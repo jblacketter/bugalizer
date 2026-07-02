@@ -69,7 +69,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _apply_generic_llm_fallbacks(self) -> "Settings":
-        """docs/llm-tiering.md: QA_LLM_* generic env as a fallback layer.
+        """QA_LLM_* generic env as a fallback layer (docs/phases/architecture.md, "LLM tiering").
 
         BUGALIZER_* settings (any source — env, .env, init kwargs) always
         win; `model_fields_set` is the explicitly-configured check. The fix

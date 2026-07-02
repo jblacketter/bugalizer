@@ -83,8 +83,8 @@ async def complete(
             )
         kwargs["api_key"] = key
     else:
-        # docs/llm-tiering.md full-string passthrough: providers beyond
-        # ollama|anthropic route via the litellm model string verbatim;
+        # Full-string passthrough (docs/phases/architecture.md, "LLM tiering"):
+        # providers beyond ollama|anthropic route via the litellm model string verbatim;
         # credentials come from provider-native env vars (litellm reads
         # OPENAI_API_KEY etc. itself).
         if model is None:
