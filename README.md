@@ -103,10 +103,11 @@ The queue worker automatically picks up the report and runs it through the pipel
 
 ## Configuration
 
-All settings use the `BUGALIZER_` environment variable prefix:
+All settings use the `BUGALIZER_` environment variable prefix. See [`.env.example`](.env.example) for the complete annotated list; the most common ones:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `BUGALIZER_HOST` / `BUGALIZER_PORT` | `0.0.0.0` / `8090` | Bind address and port |
 | `BUGALIZER_DB_PATH` | `bugalizer.db` | SQLite database path |
 | `BUGALIZER_API_KEYS` | _(empty = auth disabled)_ | Comma-separated API keys |
 | `BUGALIZER_OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
@@ -118,6 +119,8 @@ All settings use the `BUGALIZER_` environment variable prefix:
 | `BUGALIZER_QUEUE_POLL_SECONDS` | `5` | Worker poll interval |
 | `BUGALIZER_QUEUE_MAX_CONCURRENT` | `2` | Max concurrent pipeline tasks |
 | `BUGALIZER_DUPLICATE_THRESHOLD` | `0.8` | Similarity threshold for duplicate detection |
+| `BUGALIZER_MAX_TRIAGE_RETRIES` | `3` | Max triage attempts before a report is parked |
+| `BUGALIZER_RETRY_DELAY_SECONDS` | `60` | Minimum delay between triage retry attempts |
 | `BUGALIZER_LOCALIZE_CONFIDENCE_THRESHOLD` | `0.5` | Min confidence for localization Pass 2 |
 | `BUGALIZER_DEFAULT_FIX_MODEL` | `claude-sonnet-4-6` | Cloud model for Stage 4 fix proposals |
 | `BUGALIZER_FIX_PROVIDER` | `anthropic` | Provider for Stage 4 (litellm routing) |
@@ -125,6 +128,8 @@ All settings use the `BUGALIZER_` environment variable prefix:
 | `BUGALIZER_FIX_MAX_BUNDLE_BYTES` | `4194304` | Total file-bundle byte cap for Stage 4 |
 | `BUGALIZER_FIX_MAX_FILE_BYTES` | `524288` | Per-file byte cap for Stage 4 |
 | `BUGALIZER_FIX_ENABLE_PROMPT_CACHING` | `true` | Use Anthropic prompt caching for the fix-stage system prompt |
+
+Bugalizer also honors a generic `QA_LLM_MODEL` / `QA_LLM_API_BASE` fallback layer for hosts that configure LLM access once across apps — explicit `BUGALIZER_*` settings always win. See `docs/phases/architecture.md` ("LLM tiering").
 
 ## API Endpoints
 
