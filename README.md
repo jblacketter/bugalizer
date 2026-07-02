@@ -44,7 +44,8 @@ Report stored in DB, status tracked through 13-state workflow
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.12.11+
+- [uv](https://docs.astral.sh/uv/)
 - Git (for repo cloning features)
 - [Ollama](https://ollama.ai/) (for LLM-powered stages)
 
@@ -53,16 +54,14 @@ Report stored in DB, status tracked through 13-state workflow
 ```bash
 git clone https://github.com/your-org/bugalizer.git
 cd bugalizer
-python -m venv .venv
-source .venv/bin/activate   # or .venv\Scripts\activate on Windows
-pip install -e ".[dev]"
+uv sync --dev
 ```
 
 ### Run Tests
 
 ```bash
-pytest
-# 113 tests, all should pass (no Ollama required — LLM calls are mocked)
+uv run pytest
+# 139 tests, all should pass (no Ollama required — LLM calls are mocked)
 ```
 
 ### Start the Server
@@ -72,7 +71,7 @@ pytest
 ollama pull qwen2.5-coder:7b
 
 # Start Bugalizer
-BUGALIZER_DB_PATH=bugalizer.db uvicorn bugalizer.main:app --port 8090
+BUGALIZER_DB_PATH=bugalizer.db uv run uvicorn bugalizer.main:app --port 8090
 ```
 
 API docs available at [http://localhost:8090/docs](http://localhost:8090/docs).

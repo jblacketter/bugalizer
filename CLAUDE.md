@@ -5,13 +5,11 @@ AI-powered bug report processing server. Accepts structured bug reports via REST
 
 ## Quick Start
 ```bash
-python -m venv .venv
-source .venv/bin/activate   # or .venv\Scripts\activate on Windows
-pip install -e ".[dev]"
-pytest                       # 113 tests, all should pass
+uv sync --dev
+uv run pytest                # 139 tests, all should pass
 
 # Run the server
-BUGALIZER_DB_PATH=bugalizer.db uvicorn bugalizer.main:app --port 8090
+BUGALIZER_DB_PATH=bugalizer.db uv run uvicorn bugalizer.main:app --port 8090
 # API docs at http://localhost:8090/docs
 ```
 
@@ -60,8 +58,8 @@ tests/
 ## Implementation Status
 - **Phase 1 (Foundation): COMPLETE** — API, DB, auth, workflow, tests (30/30)
 - **Phase 2 (Local LLM Pipeline): COMPLETE** — Ollama triage, async queue worker, duplicate detection, token tracking (66 tests)
-- **Phase 3 (Codebase Analysis): COMPLETE** — Git ops, tree-sitter repo maps, two-pass localization, SHA freshness (113 tests)
-- **Phase 4 (Fix Proposals): IMPLEMENTED — awaiting review** — Anthropic-via-litellm stage generates unified-diff fix proposals with prompt caching; new `FIX_PROPOSING` transient claim state; `GET /reports/{id}/fix_proposals` endpoint; 130 tests passing (113 original + 17 new across fix_proposer, API, queue eligibility).
+- **Phase 3 (Codebase Analysis): COMPLETE** — Git ops, tree-sitter repo maps, two-pass localization, SHA freshness
+- **Phase 4 (Fix Proposals): IMPLEMENTED — awaiting review** — Anthropic-via-litellm stage generates unified-diff fix proposals with prompt caching; new `FIX_PROPOSING` transient claim state; `GET /reports/{id}/fix_proposals` endpoint; 139 tests passing.
 - Phase 5 (Dashboard): NOT STARTED
 - Phase 6 (Integrations): NOT STARTED
 
@@ -69,7 +67,7 @@ tests/
 Uses ai-handoff system: claude (lead) ↔ codex (reviewer). Run `/handoff` to check state.
 
 ## Dev Environment
-- Developing on Windows with RTX 4070 Super for Ollama
+- Python 3.12.11+ with `uv`
 - Queue worker disabled in tests via `BUGALIZER_QUEUE_ENABLED=false`
 
 ## Key Patterns
