@@ -14,6 +14,7 @@ os.environ["BUGALIZER_QUEUE_ENABLED"] = "false"
 from bugalizer import db
 from bugalizer.config import settings
 from bugalizer.db import (
+    analyses_for_report,
     analysis_create,
     fix_proposals_for_report,
     init_db,
@@ -24,11 +25,18 @@ from bugalizer.db import (
 )
 from bugalizer.llm.client import LLMResponse
 from bugalizer.pipeline.fix_proposer import (
+    FixProposalDefer,
     FixProposalError,
+    _classify_llm_error,
     _extract_json,
     _validate_proposal,
     propose_fix,
 )
+
+
+def _failed_fix_rows(report_id: str) -> list:
+    return [a for a in analyses_for_report(report_id, phase="fix")
+            if a["status"] == "failed"]
 
 
 @pytest.fixture(autouse=True)
@@ -257,6 +265,10 @@ async def test_propose_fix_llm_failure_returns_to_triaged(tmp_path):
 
     assert report_get(report["id"])["status"] == "triaged"
     assert fix_proposals_for_report(report["id"]) == []
+    # A transient failure is recorded (not permanent) so the retry gate can cap.
+    failed = _failed_fix_rows(report["id"])
+    assert len(failed) == 1
+    assert failed[0]["result"]["permanent"] is False
 
 
 @pytest.mark.asyncio
@@ -278,6 +290,10 @@ async def test_propose_fix_malformed_llm_output_returns_to_triaged(tmp_path):
 
     assert report_get(report["id"])["status"] == "triaged"
     assert fix_proposals_for_report(report["id"]) == []
+    # Malformed output is a permanent failure — will not be retried.
+    failed = _failed_fix_rows(report["id"])
+    assert len(failed) == 1
+    assert failed[0]["result"]["permanent"] is True
 
 
 @pytest.mark.asyncio
@@ -298,6 +314,9 @@ async def test_propose_fix_rejects_non_diff_llm_output(tmp_path):
 
     assert report_get(report["id"])["status"] == "triaged"
     assert fix_proposals_for_report(report["id"]) == []
+    failed = _failed_fix_rows(report["id"])
+    assert len(failed) == 1
+    assert failed[0]["result"]["permanent"] is True
 
 
 @pytest.mark.asyncio
@@ -318,9 +337,11 @@ async def test_propose_fix_no_localization_returns_to_triaged(tmp_path):
 
     await propose_fix(report["id"])
 
-    # Returned to triaged; no proposal created.
+    # Returned to triaged; no proposal created; and — being a precondition
+    # defer, not a fix attempt — NO failed fix row is recorded.
     assert report_get(report["id"])["status"] == "triaged"
     assert fix_proposals_for_report(report["id"]) == []
+    assert _failed_fix_rows(report["id"]) == []
 
 
 @pytest.mark.asyncio
@@ -344,3 +365,21 @@ async def test_propose_fix_rejects_stale_localization(tmp_path):
 
     assert report_get(report["id"])["status"] == "triaged"
     assert fix_proposals_for_report(report["id"]) == []
+    # Stale localization is a defer, not a failure: no fix row is recorded,
+    # so it never counts toward max_fix_retries.
+    assert _failed_fix_rows(report["id"]) == []
+
+
+def test_classify_llm_error():
+    """Auth/bad-request errors are permanent; network/timeout are transient."""
+    class AuthenticationError(Exception):
+        pass
+
+    class RateLimitError(Exception):
+        pass
+
+    assert _classify_llm_error(AuthenticationError("bad key")) is True
+    assert _classify_llm_error(RateLimitError("slow down")) is False
+    assert _classify_llm_error(TimeoutError("timed out")) is False
+    assert _classify_llm_error(RuntimeError("BUGALIZER_ANTHROPIC_API_KEY not set")) is True
+    assert _classify_llm_error(RuntimeError("connection reset")) is False

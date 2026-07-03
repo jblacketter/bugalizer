@@ -35,11 +35,14 @@ and security blockers must land before (or with) visibility features.
 
 ---
 
-## 2026-07-02: Retire the Fernet at-rest key-encryption plan (pending §5.2 confirmation)
+## 2026-07-02: Retire the Fernet at-rest key-encryption plan (CONFIRMED, implemented 2026-07-03)
 
-**Decision:** Recommend removing the unimplemented Fernet stub (`settings.secret_key`, the unused
+**Decision:** Remove the unimplemented Fernet stub (`settings.secret_key`, the unused
 `projects.api_key_encrypted` column) rather than implementing it. Cloud credentials come from
-environment variables only. Final confirmation happens in Phase 5 §5.2 review.
+environment variables only. **Confirmed in the Phase 5 plan review (round 2, codex APPROVE) and
+implemented in Cycle 1 (§5.2):** `secret_key` dropped from `config.py` and `api_key_encrypted`
+removed from the `projects` schema. Pre-existing databases keep the now-unused column harmlessly
+(schema uses `CREATE TABLE IF NOT EXISTS`; nothing reads or writes it).
 
 **Context:** The original architecture called for Fernet encryption of stored LLM API keys. It was
 never implemented — only a config field and a DB column exist; `cryptography` is not even a
@@ -54,12 +57,12 @@ dependency. Meanwhile the working pattern is env-var credentials (`BUGALIZER_ANT
 secrets. Env-var secrets are the simplest honest posture. Revisit if per-project cloud keys
 become a real feature (Phase 6 integrations).
 
-**Decided By:** claude (recommendation) — pending codex review in Phase 5 Cycle 1
+**Decided By:** claude (recommendation) + codex (APPROVE, Phase 5 plan round 2)
 
 **Phase:** 5 (§5.2)
 
 **Follow-ups:**
-- Remove `secret_key` setting and `api_key_encrypted` column reference in the §5.2 change.
+- ~~Remove `secret_key` setting and `api_key_encrypted` column reference in the §5.2 change.~~ Done 2026-07-03 (Cycle 1).
 
 ---
 

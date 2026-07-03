@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     # Comma-separated list of valid API keys for X-API-Key auth.
     api_keys: str = ""
 
+    # Comma-separated list of allowed CORS origins. Empty = closed (no
+    # cross-origin browser access). The dashboard is served same-origin by
+    # this app, so it needs no CORS; other LAN apps talk server-to-server.
+    cors_origins: str = ""
+
     # SQLite database path (relative to cwd or absolute).
     db_path: str = "bugalizer.db"
 
@@ -38,6 +43,10 @@ class Settings(BaseSettings):
     duplicate_threshold: float = 0.8
     retry_delay_seconds: int = 60
     max_triage_retries: int = 3
+    # Stage 3 localization and Stage 4 fix retry caps. Fix defaults lower —
+    # each fix retry is a paid cloud call. Permanent failures never retry.
+    max_localize_retries: int = 3
+    max_fix_retries: int = 2
 
     # Git repos
     repos_dir: str = "./repos"
@@ -53,9 +62,6 @@ class Settings(BaseSettings):
     localize_max_file_chars: int = 8000
     localize_max_files: int = 3
     localize_confidence_threshold: float = 0.5
-
-    # Encryption key for stored LLM API keys (Fernet, base64-encoded 32 bytes).
-    secret_key: str = ""
 
     # Fix proposals (Stage 4 / bugalizer Phase 4) — cloud LLM via litellm.
     default_fix_model: str = "claude-sonnet-4-6"
@@ -104,6 +110,12 @@ class Settings(BaseSettings):
         if not self.api_keys.strip():
             return set()
         return {k.strip() for k in self.api_keys.split(",") if k.strip()}
+
+    def cors_origin_list(self) -> list[str]:
+        """Return the configured CORS origins (empty list = closed)."""
+        if not self.cors_origins.strip():
+            return []
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
 settings = Settings()

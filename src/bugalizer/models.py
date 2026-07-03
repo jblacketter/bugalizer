@@ -159,6 +159,9 @@ class BugReportResponse(BaseModel):
     created_at: str
     updated_at: str
     warnings: list[str] = Field(default_factory=list)
+    # Populated when the report has an unresolved pipeline failure (retry gate).
+    failed_stage: Optional[str] = None
+    last_error: Optional[str] = None
 
 
 class BugReportListResponse(BaseModel):
@@ -220,10 +223,20 @@ class ProjectListResponse(BaseModel):
 # Queue models
 # ---------------------------------------------------------------------------
 
+class FailedReport(BaseModel):
+    """A report parked with an unresolved pipeline failure."""
+    id: str
+    title: str
+    failed_stage: str
+    last_error: Optional[str] = None
+    permanent: bool = False
+
+
 class QueueOverview(BaseModel):
     """Status counts for the bug report queue."""
     total: int = 0
     by_status: dict[str, int] = Field(default_factory=dict)
+    failed: list[FailedReport] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

@@ -97,7 +97,6 @@ CREATE TABLE IF NOT EXISTS projects (
     default_branch TEXT DEFAULT 'main',
     llm_provider TEXT DEFAULT 'ollama',
     llm_model TEXT DEFAULT 'qwen2.5-coder:7b',
-    api_key_encrypted TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -582,6 +581,64 @@ def submitted_reports() -> list[dict[str, Any]]:
     return [_report_row_to_dict(r) for r in rows]
 
 
+def _latest_completed_created_at(rows: list[dict[str, Any]]) -> Optional[str]:
+    """Given analysis dicts (newest-first), return the newest completed row's
+    `created_at`, or None if none completed."""
+    for r in rows:
+        if r.get("status") == "completed":
+            return r.get("created_at")
+    return None
+
+
+def _failed_attempts_after(
+    rows: list[dict[str, Any]], reference_created_at: Optional[str]
+) -> list[dict[str, Any]]:
+    """Failed analysis rows (newest-first order preserved) that are newer than
+    `reference_created_at`. A successful attempt resets the failure budget, so
+    only failures since the last success count. ISO-8601 UTC timestamps compare
+    lexicographically."""
+    out = []
+    for r in rows:
+        if r.get("status") != "failed":
+            continue
+        created = r.get("created_at")
+        if reference_created_at is None or (created and created > reference_created_at):
+            out.append(r)
+    return out
+
+
+def _retry_blocked(
+    failed_rows: list[dict[str, Any]],
+    max_retries: int,
+    retry_delay: int,
+    now: datetime,
+) -> bool:
+    """Return True if a stage should be SKIPPED given its failed attempts.
+
+    Blocks when: any failure is marked `permanent` (never retry), the failure
+    count has reached `max_retries`, or the most recent failure is still within
+    the `retry_delay` window. `failed_rows` must be newest-first.
+    """
+    if not failed_rows:
+        return False
+    for r in failed_rows:
+        result = r.get("result")
+        if isinstance(result, dict) and result.get("permanent"):
+            return True
+    if len(failed_rows) >= max_retries:
+        return True
+    latest = failed_rows[0]
+    completed_at = latest.get("completed_at")
+    if completed_at:
+        try:
+            elapsed = (now - datetime.fromisoformat(completed_at)).total_seconds()
+        except ValueError:
+            return False
+        if elapsed < retry_delay:
+            return True
+    return False
+
+
 def localization_eligible_reports() -> list[dict[str, Any]]:
     """Return triaged reports eligible for Stage 3 localization.
 
@@ -591,8 +648,12 @@ def localization_eligible_reports() -> list[dict[str, Any]]:
     - Project has repo_path set (repo cloned)
     - Either no completed localization analysis, or latest completed
       localization's repo_sha differs from project.head_sha
+    - Not blocked by the localization retry gate (max_localize_retries /
+      retry_delay_seconds / a permanent failure), derived from failed
+      localization analysis rows since the last successful localization.
     """
     conn = _get_conn()
+    now = datetime.now(timezone.utc)
 
     # Get triaged reports with completed triage and project with repo_path
     rows = conn.execute(
@@ -616,6 +677,14 @@ def localization_eligible_reports() -> list[dict[str, Any]]:
         report["_repo_path"] = row["repo_path"]
         report["_default_branch"] = row["default_branch"]
         project_head_sha = row["project_head_sha"]
+
+        # Retry gate: skip reports whose localization keeps failing. Failures
+        # since the last successful localization count toward the cap.
+        all_loc = analyses_for_report(report["id"], phase="localization")
+        failed = _failed_attempts_after(all_loc, _latest_completed_created_at(all_loc))
+        if _retry_blocked(failed, settings.max_localize_retries,
+                          settings.retry_delay_seconds, now):
+            continue
 
         # Check localization state
         loc_rows = conn.execute(
@@ -722,9 +791,14 @@ def reports_eligible_for_fix() -> list[dict[str, Any]]:
       `docs/phases/phase-4-fix-proposals.md`).
     - Does NOT yet have a fix_proposals row for that latest localization
       analysis.
+    - Not blocked by the fix retry gate (max_fix_retries / retry_delay_seconds /
+      a permanent failure), derived from failed `fix` analysis rows recorded
+      since the current localization. Each retry is a paid cloud call, so the
+      cap is deliberately low and permanent failures never retry.
     - Not soft-deleted.
     """
     conn = _get_conn()
+    now = datetime.now(timezone.utc)
     rows = conn.execute(
         """SELECT br.*, p.head_sha AS project_head_sha
            FROM bug_reports br
@@ -746,7 +820,7 @@ def reports_eligible_for_fix() -> list[dict[str, Any]]:
 
         # Latest completed localization for this report.
         loc = conn.execute(
-            """SELECT id, result FROM analyses
+            """SELECT id, result, created_at FROM analyses
                WHERE bug_report_id = ?
                AND phase = 'localization' AND status = 'completed'
                ORDER BY created_at DESC LIMIT 1""",
@@ -772,6 +846,14 @@ def reports_eligible_for_fix() -> list[dict[str, Any]]:
             (report["id"], loc["id"]),
         ).fetchone()
         if already is not None:
+            continue
+
+        # Retry gate: failed `fix` attempts since the current localization was
+        # produced count toward the cap; a fresh localization resets the budget.
+        fix_rows = analyses_for_report(report["id"], phase="fix")
+        failed = _failed_attempts_after(fix_rows, loc["created_at"])
+        if _retry_blocked(failed, settings.max_fix_retries,
+                          settings.retry_delay_seconds, now):
             continue
 
         eligible.append(report)
@@ -801,6 +883,60 @@ def reset_triage_retries(bug_report_id: str) -> bool:
     )
     conn.commit()
     return cursor.rowcount > 0
+
+
+# Pipeline stages that accumulate failed analysis rows and are gated by a
+# retry cap. `validation` is excluded — it never retries via this path.
+_RETRYABLE_PHASES = ("triage", "localization", "fix")
+
+
+@retry_on_locked
+def reset_stage_retries(bug_report_id: str) -> bool:
+    """Delete failed triage/localization/fix analyses for a report so the worker
+    re-dispatches it. Returns True if any failed row was removed."""
+    conn = _get_conn()
+    placeholders = ",".join("?" for _ in _RETRYABLE_PHASES)
+    cursor = conn.execute(
+        f"DELETE FROM analyses WHERE bug_report_id = ? AND status = 'failed' "
+        f"AND phase IN ({placeholders})",
+        (bug_report_id, *_RETRYABLE_PHASES),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def report_failure_info(bug_report_id: str) -> Optional[dict[str, Any]]:
+    """Return `{failed_stage, last_error, permanent}` for the most recent failed
+    pipeline analysis of a report, or None if there is no failure on record.
+
+    A stage that later completed successfully is not reported: only failures
+    newer than that stage's last success count (mirrors the retry gate).
+    """
+    stage_names = {"triage": "triage", "localization": "localization", "fix": "fix"}
+    latest_failure: Optional[dict[str, Any]] = None
+    for phase in _RETRYABLE_PHASES:
+        rows = analyses_for_report(bug_report_id, phase=phase)
+        failed = _failed_attempts_after(rows, _latest_completed_created_at(rows))
+        if not failed:
+            continue
+        candidate = failed[0]  # newest-first
+        if latest_failure is None or (
+            candidate.get("created_at", "") > latest_failure.get("created_at", "")
+        ):
+            latest_failure = {"phase": phase, **candidate}
+    if latest_failure is None:
+        return None
+    result = latest_failure.get("result")
+    error = None
+    permanent = False
+    if isinstance(result, dict):
+        error = result.get("error")
+        permanent = bool(result.get("permanent"))
+    return {
+        "failed_stage": stage_names.get(latest_failure["phase"], latest_failure["phase"]),
+        "last_error": error,
+        "permanent": permanent,
+    }
 
 
 # ---------------------------------------------------------------------------

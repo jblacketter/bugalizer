@@ -64,27 +64,28 @@ single process is fine for one LAN host), auth beyond static API keys.
 
 Mirror the triage retry pattern for Stages 3 and 4:
 
-- [ ] **Stage 3 (localization):** on failure, write a failure record (parallel to the failed
-      analysis row triage writes) instead of silently resetting to `triaged`. Enforce
-      `max_localize_retries` (new setting, default 3) and `retry_delay_seconds` in
-      `db.py::localization_eligible_reports`.
-- [ ] **Stage 4 (fix proposal):** same, with `max_fix_retries` (new setting, default **2** — each
-      retry is a paid cloud call) enforced in `db.py::reports_eligible_for_fix`. Distinguish
-      transient errors (timeout, 429/5xx → retry) from permanent ones (invalid diff output,
-      auth failure → no retry) where litellm exposes the difference.
-- [ ] Reports that exhaust retries stay in `triaged` but are excluded from dispatch by the
+- [x] **Stage 3 (localization):** the localizer already writes a failed analysis row on failure;
+      Cycle 1 adds the retry gate — `max_localize_retries` (default 3) + `retry_delay_seconds`
+      enforced in `db.py::localization_eligible_reports`, derived from failed localization rows
+      since the last successful one.
+- [x] **Stage 4 (fix proposal):** `propose_fix` now records a failed `fix` analysis row on real
+      failures and classifies transient (timeout/429/5xx → retry) vs permanent (invalid diff
+      output, auth failure → no retry, via `_classify_llm_error`). Precondition misses (no/stale
+      localization) *defer* without recording a failure. `max_fix_retries` (default **2**) enforced
+      in `db.py::reports_eligible_for_fix`.
+- [x] Reports that exhaust retries stay in `triaged` but are excluded from dispatch by the
       eligibility queries themselves — retry exhaustion is *derived from failed Stage 3/4 analysis
-      rows* (mirroring how `triage_eligible_reports` counts failed triage rows), not stored as a
-      separate status. `failed_stage` / `last_error` surfaced in `GET /reports/{id}` and the queue
-      overview are computed from the latest failed analysis row for the stage. `POST
-      /api/v1/queue/{id}/retry` re-enables a report by deleting its failed Stage 3/4 analysis rows
-      (today it only clears triage), which drops the derived count back below the cap. (Reviewer-
-      resolved: keep exhausted reports in `triaged`, do not overload `deferred`.)
-- [ ] **Real health check:** `/health` should report DB reachability and Ollama reachability
-      (cheap `GET {ollama_host}/api/tags` with short timeout), plus worker-alive status. Keep a
-      liveness-only variant for the process supervisor.
+      rows* (`_retry_blocked` / `_failed_attempts_after`), not a separate status. `failed_stage` /
+      `last_error` (`db.py::report_failure_info`) surfaced in `GET /reports/{id}` and the queue
+      overview. `POST /api/v1/queue/{id}/retry` now deletes failed triage/localization/fix rows
+      (`reset_stage_retries`), dropping the derived count below the cap. (Reviewer-resolved: keep
+      exhausted reports in `triaged`, do not overload `deferred`.)
+- [x] **Real health check:** `/health` reports DB reachability, Ollama reachability (`GET
+      {ollama_host}/api/tags`, 2s timeout), and worker-alive; returns 503 only if the DB is
+      unreachable, else `degraded`. `/health/live` is the dependency-free liveness probe.
 - [ ] Optional hardening: skip dispatching Ollama stages for one poll cycle after an
-      Ollama-connectivity failure (simple cooldown, not a full circuit breaker).
+      Ollama-connectivity failure (simple cooldown). **Deferred** — not needed for the blocker;
+      revisit if flapping Ollama causes churn.
 
 **Acceptance:** a report whose localization or fix stage always fails ends in a visible failed
 state after N attempts, with the error recorded; no unbounded Anthropic spend is possible; tests
@@ -92,18 +93,15 @@ cover retry-cap exhaustion and the retry endpoint for both stages.
 
 ## 5.2 Security hardening (blocker)
 
-- [ ] **Auth on by default for LAN:** keep the empty-keys-disables-auth behavior for tests/dev,
-      but log a prominent startup warning, and document generating a key in the deploy guide.
-      The deployed instance MUST set `BUGALIZER_API_KEYS`.
-- [ ] **CORS:** replace `allow_origins=["*"]` (`main.py:42`) with a `BUGALIZER_CORS_ORIGINS`
-      setting, defaulting to same-origin only (the dashboard in 5.4 is served by this app, so it
-      needs no CORS at all; other LAN apps talk server-to-server with API keys, not from browsers).
-- [ ] **Decide the Fernet stub:** recommendation — **remove it** (drop `settings.secret_key` and
-      the unused `projects.api_key_encrypted` column reference) and record the decision:
-      single-user LAN service, secrets come from env (`BUGALIZER_ANTHROPIC_API_KEY`), at-rest
-      encryption deferred until multi-tenant use. The alternative (actually implementing Fernet +
-      `cryptography` dep) is more code for no current threat-model gain.
-- [ ] Run `/security-check` skill before handoff.
+- [x] **Auth on by default for LAN:** empty-keys-disables-auth is kept for tests/dev, but the
+      lifespan now logs a prominent startup warning when `BUGALIZER_API_KEYS` is empty, pointing at
+      the deploy guide. (Deploy-guide key-generation doc is 5.5.)
+- [x] **CORS:** `allow_origins=["*"]` removed. CORS middleware is only mounted when
+      `BUGALIZER_CORS_ORIGINS` is set; default is closed (no cross-origin browser access).
+- [x] **Fernet stub removed:** dropped `settings.secret_key` and the `projects.api_key_encrypted`
+      schema column; decision recorded in `docs/decision_log.md`. (Pre-existing DBs keep the unused
+      column harmlessly — `CREATE TABLE IF NOT EXISTS`, nothing reads it.)
+- [x] Run `/security-check` skill before handoff. — run in Cycle 1; findings addressed inline.
 
 **Acceptance:** deployed config requires an API key; CORS is closed by default; no half-implemented
 crypto remains in the codebase; decision logged.

@@ -382,3 +382,137 @@ def test_reports_eligible_for_fix_excludes_when_project_head_unknown(tmp_path):
                     status="completed", result={"repo_sha": "anysha"})
 
     assert reports_eligible_for_fix() == []
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 / Stage 4 retry caps + failure surfacing (Phase 5.1)
+# ---------------------------------------------------------------------------
+
+def _seed_localization_project(tmp_path):
+    from bugalizer.db import project_create, project_update
+    project = project_create(name="p", repo_url="https://example.com/r.git")
+    project_update(project["id"], repo_path=str(tmp_path), head_sha="h1")
+    return project
+
+
+def test_localization_retry_cap_and_reset(tmp_path):
+    from bugalizer.config import settings
+    from bugalizer.db import (
+        localization_eligible_reports, report_create,
+        report_update_status, reset_stage_retries,
+    )
+    settings.max_localize_retries = 3
+    settings.retry_delay_seconds = 60
+
+    project = _seed_localization_project(tmp_path)
+    r = report_create(project_id=project["id"], title="t", description="d",
+                      reporter="q@e.com", severity="low")
+    report_update_status(r["id"], "triaged")
+    analysis_create(r["id"], "triage", "completed")
+
+    old = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+
+    def eligible_ids():
+        return {x["id"] for x in localization_eligible_reports()}
+
+    # 2 failures (< cap of 3): still eligible (never successfully localized).
+    for _ in range(2):
+        analysis_create(r["id"], "localization", "failed",
+                        result={"error": "boom"}, completed_at=old)
+    assert r["id"] in eligible_ids()
+
+    # 3rd failure reaches the cap: excluded from dispatch.
+    analysis_create(r["id"], "localization", "failed",
+                    result={"error": "boom"}, completed_at=old)
+    assert r["id"] not in eligible_ids()
+
+    # Retry endpoint clears failed rows -> eligible again.
+    reset_stage_retries(r["id"])
+    assert r["id"] in eligible_ids()
+
+
+def test_localization_retry_delay_blocks_recent_failure(tmp_path):
+    from bugalizer.config import settings
+    from bugalizer.db import (
+        localization_eligible_reports, report_create, report_update_status,
+    )
+    settings.max_localize_retries = 3
+    settings.retry_delay_seconds = 60
+
+    project = _seed_localization_project(tmp_path)
+    r = report_create(project_id=project["id"], title="t", description="d",
+                      reporter="q@e.com", severity="low")
+    report_update_status(r["id"], "triaged")
+    analysis_create(r["id"], "triage", "completed")
+
+    # A single *recent* failure is within the retry-delay window -> not eligible.
+    recent = datetime.now(timezone.utc).isoformat()
+    analysis_create(r["id"], "localization", "failed",
+                    result={"error": "boom"}, completed_at=recent)
+    assert r["id"] not in {x["id"] for x in localization_eligible_reports()}
+
+
+def test_fix_retry_cap_transient_and_permanent(tmp_path):
+    from bugalizer.config import settings
+    from bugalizer.db import (
+        reports_eligible_for_fix, report_create, report_update_status,
+        reset_stage_retries,
+    )
+    settings.max_fix_retries = 2
+    settings.retry_delay_seconds = 60
+
+    project = _seed_localization_project(tmp_path)
+    old = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+
+    def fresh_report():
+        rr = report_create(project_id=project["id"], title="t", description="d",
+                           reporter="q@e.com", severity="low")
+        report_update_status(rr["id"], "triaged")
+        analysis_create(rr["id"], "localization", "completed",
+                        result={"repo_sha": "h1"})
+        return rr
+
+    def eligible_ids():
+        return {x["id"] for x in reports_eligible_for_fix()}
+
+    # Transient: 1 failure (< cap 2) -> still eligible.
+    r1 = fresh_report()
+    analysis_create(r1["id"], "fix", "failed",
+                    result={"error": "timeout", "permanent": False}, completed_at=old)
+    assert r1["id"] in eligible_ids()
+    # 2nd transient failure reaches the (low) paid-call cap -> excluded.
+    analysis_create(r1["id"], "fix", "failed",
+                    result={"error": "timeout", "permanent": False}, completed_at=old)
+    assert r1["id"] not in eligible_ids()
+    reset_stage_retries(r1["id"])
+    assert r1["id"] in eligible_ids()
+
+    # Permanent: a single permanent failure excludes immediately (no retry).
+    r2 = fresh_report()
+    analysis_create(r2["id"], "fix", "failed",
+                    result={"error": "bad diff", "permanent": True}, completed_at=old)
+    assert r2["id"] not in eligible_ids()
+
+
+def test_report_failure_info_reports_latest_failed_stage(tmp_path):
+    from bugalizer.db import (
+        report_failure_info, report_create, report_update_status,
+    )
+    project = _seed_localization_project(tmp_path)
+    r = report_create(project_id=project["id"], title="t", description="d",
+                      reporter="q@e.com", severity="low")
+    report_update_status(r["id"], "triaged")
+
+    # No failures yet.
+    assert report_failure_info(r["id"]) is None
+
+    analysis_create(r["id"], "localization", "failed",
+                    result={"error": "loc boom", "permanent": False})
+    info = report_failure_info(r["id"])
+    assert info["failed_stage"] == "localization"
+    assert info["last_error"] == "loc boom"
+    assert info["permanent"] is False
+
+    # A later completed localization clears the failure from the report view.
+    analysis_create(r["id"], "localization", "completed", result={"repo_sha": "h1"})
+    assert report_failure_info(r["id"]) is None

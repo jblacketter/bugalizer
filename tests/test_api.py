@@ -32,10 +32,24 @@ client = TestClient(app)
 # Health
 # ---------------------------------------------------------------------------
 
-def test_health():
-    r = client.get("/health")
+def test_health_liveness():
+    """Liveness probe is dependency-free and always ok when the process is up."""
+    r = client.get("/health/live")
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
+
+
+def test_health_readiness_reports_checks():
+    """Readiness reports per-component checks. DB is reachable in tests, so it
+    returns 200; Ollama is down (no server) so overall is 'degraded'."""
+    r = client.get("/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["checks"]["database"] is True
+    # ollama + worker keys are present regardless of their state
+    assert "ollama" in body["checks"]
+    assert "worker" in body["checks"]
+    assert body["status"] in ("ok", "degraded")
 
 
 # ---------------------------------------------------------------------------
@@ -400,3 +414,72 @@ def test_list_fix_proposals_returns_persisted_rows(tmp_path):
     assert row["files_changed"] == ["x.py"]
     assert row["analysis_id"] == analysis["id"]
     assert row["status"] == "proposed"
+
+
+# ---------------------------------------------------------------------------
+# Failure surfacing + CORS (Phase 5.1 / 5.2)
+# ---------------------------------------------------------------------------
+
+def _seed_failed_report(phase="fix", error="boom", permanent=True):
+    from bugalizer.db import (
+        project_create, report_create, report_update_status, analysis_create,
+    )
+    proj = project_create(name="p", repo_url="https://example.com/r.git")
+    rep = report_create(project_id=proj["id"], title="Broken thing",
+                        description="d", reporter="q@e.com", severity="low")
+    report_update_status(rep["id"], "triaged")
+    analysis_create(rep["id"], phase, "failed",
+                    result={"error": error, "permanent": permanent})
+    return rep
+
+
+def test_report_get_includes_failed_stage():
+    rep = _seed_failed_report(phase="fix", error="bad diff", permanent=True)
+    r = client.get(f"/api/v1/reports/{rep['id']}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["failed_stage"] == "fix"
+    assert body["last_error"] == "bad diff"
+
+
+def test_report_get_no_failure_leaves_fields_null():
+    from bugalizer.db import project_create, report_create
+    proj = project_create(name="p", repo_url="https://example.com/r.git")
+    rep = report_create(project_id=proj["id"], title="fine", description="d",
+                        reporter="q@e.com", severity="low")
+    body = client.get(f"/api/v1/reports/{rep['id']}").json()
+    assert body["failed_stage"] is None
+    assert body["last_error"] is None
+
+
+def test_queue_overview_lists_failed_reports():
+    rep = _seed_failed_report(phase="localization", error="loc boom", permanent=False)
+    body = client.get("/api/v1/queue").json()
+    failed_ids = {f["id"]: f for f in body["failed"]}
+    assert rep["id"] in failed_ids
+    entry = failed_ids[rep["id"]]
+    assert entry["failed_stage"] == "localization"
+    assert entry["last_error"] == "loc boom"
+    assert entry["permanent"] is False
+
+
+def test_cors_closed_by_default():
+    from bugalizer.main import create_app
+    from bugalizer.config import settings
+    settings.cors_origins = ""
+    c = TestClient(create_app())
+    r = c.get("/health/live", headers={"Origin": "http://evil.example"})
+    header_names = {k.lower() for k in r.headers}
+    assert "access-control-allow-origin" not in header_names
+
+
+def test_cors_allows_configured_origin():
+    from bugalizer.main import create_app
+    from bugalizer.config import settings
+    settings.cors_origins = "http://dash.local"
+    try:
+        c = TestClient(create_app())
+        r = c.get("/health/live", headers={"Origin": "http://dash.local"})
+        assert r.headers.get("access-control-allow-origin") == "http://dash.local"
+    finally:
+        settings.cors_origins = ""

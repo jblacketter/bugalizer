@@ -91,6 +91,12 @@ async def _poll_loop() -> None:
         await asyncio.sleep(poll_interval)
 
 
+def worker_alive() -> bool:
+    """True if the background queue worker task is running (started, not
+    finished/cancelled). Used by the readiness health check."""
+    return _worker_task is not None and not _worker_task.done()
+
+
 def start_worker() -> asyncio.Task:
     """Start the background queue worker. Returns the task handle."""
     global _worker_task

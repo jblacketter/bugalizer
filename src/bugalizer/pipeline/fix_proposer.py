@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from bugalizer.config import settings
@@ -39,7 +40,46 @@ logger = logging.getLogger(__name__)
 
 
 class FixProposalError(Exception):
-    """Raised when fix-proposal generation cannot proceed."""
+    """A real fix-proposal failure — recorded as a failed `fix` analysis row.
+
+    `permanent=True` means retrying will not help (bad LLM output, auth
+    failure) and the retry gate must never re-dispatch. Defaults to permanent
+    because the common raisers are output-validation failures.
+    """
+
+    def __init__(self, message: str, *, permanent: bool = True) -> None:
+        super().__init__(message)
+        self.permanent = permanent
+
+
+class FixProposalDefer(Exception):
+    """A precondition is not met (no/stale localization, no candidate files,
+    project misconfig). The report is returned to `triaged` WITHOUT recording a
+    failure — it is not a fix attempt, so it must not count toward the cap."""
+
+
+def _classify_llm_error(exc: BaseException) -> bool:
+    """Return True if an exception from the LLM call is *permanent* (no retry).
+
+    Auth/permission/bad-request failures are permanent; timeouts, rate limits,
+    and transient network/API errors are retryable. Classified by exception type
+    name so we do not hard-depend on litellm's exception hierarchy.
+    """
+    permanent_markers = (
+        "AuthenticationError",
+        "PermissionDeniedError",
+        "PermissionError",
+        "BadRequestError",
+        "NotFoundError",
+        "InvalidRequestError",
+    )
+    name = type(exc).__name__
+    if name in permanent_markers:
+        return True
+    # The client raises RuntimeError when the Anthropic key is missing.
+    if isinstance(exc, RuntimeError) and "API_KEY" in str(exc).upper():
+        return True
+    return False
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -208,9 +248,11 @@ async def propose_fix(report_id: str) -> None:
     """Run the fix-proposal stage for a report.
 
     Atomically claims `triaged → fix_proposing`. On success transitions to
-    `fix_proposed` and persists a `fix_proposals` row. On any failure
-    (config, LLM, parse, or validation) returns the report to `triaged`
-    so the worker can retry next tick.
+    `fix_proposed` and persists a `fix_proposals` row. A precondition miss
+    (no/stale localization, no candidate files) defers back to `triaged`
+    without recording a failure. A real failure (LLM/parse/validation) records
+    a failed `fix` analysis row — marked transient or permanent — so the retry
+    gate in `reports_eligible_for_fix` can cap paid re-dispatch.
     """
     # 1. Atomic claim — exits if another worker already took it.
     async with db_write_lock:
@@ -229,7 +271,7 @@ async def propose_fix(report_id: str) -> None:
         # localization analysis already, skip.
         analysis = latest_completed_localization(report_id)
         if not analysis:
-            raise FixProposalError("No completed localization analysis to work from")
+            raise FixProposalDefer("No completed localization analysis to work from")
 
         existing = fix_proposals_for_report(report_id)
         if any(p.get("analysis_id") == analysis["id"] for p in existing):
@@ -243,7 +285,7 @@ async def propose_fix(report_id: str) -> None:
 
         project = project_get(report["project_id"])
         if not project or not project.get("repo_path"):
-            raise FixProposalError("Report project has no repo_path; cannot read files")
+            raise FixProposalDefer("Report project has no repo_path; cannot read files")
 
         # Defensive freshness gate: never spend a paid cloud call on stale
         # file evidence. The eligibility query already filters stale
@@ -253,7 +295,7 @@ async def propose_fix(report_id: str) -> None:
         result = analysis.get("result")
         loc_sha = result.get("repo_sha") if isinstance(result, dict) else None
         if not head_sha or loc_sha != head_sha:
-            raise FixProposalError(
+            raise FixProposalDefer(
                 f"Localization is stale (repo_sha={loc_sha!r} != "
                 f"project head_sha={head_sha!r}); skipping fix proposal"
             )
@@ -261,7 +303,7 @@ async def propose_fix(report_id: str) -> None:
         # 2. Gather candidate files, bounded by size caps.
         candidates = _collect_candidate_files(analysis)
         if not candidates:
-            raise FixProposalError("Localization produced no candidate files")
+            raise FixProposalDefer("Localization produced no candidate files")
 
         per_file_cap = settings.fix_max_file_bytes
         file_contents: dict[str, str] = await asyncio.to_thread(
@@ -283,7 +325,7 @@ async def propose_fix(report_id: str) -> None:
             capped[path] = clipped
             total += len(clipped)
         if not capped:
-            raise FixProposalError("No candidate file contents available after path+size checks")
+            raise FixProposalDefer("No candidate file contents available after path+size checks")
 
         # 3. Build prompt + call LLM.
         messages = format_fix_proposal_prompt(
@@ -339,8 +381,31 @@ async def propose_fix(report_id: str) -> None:
             report_id, validated["confidence"], len(validated["files_changed"]),
         )
 
-    except Exception as exc:
-        logger.error("Fix proposal failed for report %s: %s", report_id, exc)
-        # Return the report to triaged so the worker can retry.
+    except FixProposalDefer as exc:
+        # Precondition not met — not a fix attempt. Return to triaged WITHOUT
+        # recording a failure, so it never counts toward max_fix_retries.
+        logger.info("Fix proposal deferred for report %s: %s", report_id, exc)
         async with db_write_lock:
+            try_claim_report(report_id, "fix_proposing", "triaged")
+
+    except Exception as exc:
+        # A real fix attempt failed. Record a failed `fix` analysis row so the
+        # retry gate can cap re-dispatch, and classify transient vs permanent
+        # (permanent = never retry — bad output or auth failure).
+        if isinstance(exc, FixProposalError):
+            permanent = exc.permanent
+        else:
+            permanent = _classify_llm_error(exc)
+        logger.error(
+            "Fix proposal failed for report %s (permanent=%s): %s",
+            report_id, permanent, exc,
+        )
+        async with db_write_lock:
+            analysis_create(
+                bug_report_id=report_id,
+                phase="fix",
+                status="failed",
+                result={"error": str(exc), "permanent": permanent},
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
             try_claim_report(report_id, "fix_proposing", "triaged")

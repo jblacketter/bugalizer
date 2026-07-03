@@ -12,6 +12,7 @@ from bugalizer.db import (
     project_exists,
     report_create,
     report_delete,
+    report_failure_info,
     report_get,
     report_list,
     report_update_status,
@@ -130,7 +131,12 @@ def get_report(
     row = report_get(report_id)
     if not row:
         raise HTTPException(status_code=404, detail="Bug report not found")
-    return _row_to_response(row)
+    resp = _row_to_response(row)
+    failure = report_failure_info(report_id)
+    if failure:
+        resp.failed_stage = failure["failed_stage"]
+        resp.last_error = failure["last_error"]
+    return resp
 
 
 @router.patch("/reports/{report_id}/status")
