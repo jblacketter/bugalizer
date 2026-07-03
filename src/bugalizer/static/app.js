@@ -1,138 +1,11 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bugalizer — Queue</title>
-<style>
-  :root {
-    --bg: #10141a; --panel: #181e27; --card: #212a36; --border: #2e3947;
-    --text: #d7dee8; --dim: #8494a7; --accent: #4da3ff;
-    --ok: #3fb96b; --warn: #e0a83a; --err: #e05f5f;
-    --sev-critical: #e05f5f; --sev-high: #e0813a; --sev-medium: #e0c23a; --sev-low: #6fa7d8;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font: 14px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
-  }
-  header {
-    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
-    padding: 10px 18px; background: var(--panel); border-bottom: 1px solid var(--border);
-    position: sticky; top: 0; z-index: 5;
-  }
-  header h1 { font-size: 17px; margin: 0; }
-  #poll-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); display: inline-block; }
-  #poll-dot.ok { background: var(--ok); } #poll-dot.err { background: var(--err); }
-  #poll-info { color: var(--dim); font-size: 12px; }
-  #usage { color: var(--dim); font-size: 12px; margin-left: auto; }
-  #usage b { color: var(--text); }
-  #key-box input {
-    background: var(--card); border: 1px solid var(--border); color: var(--text);
-    border-radius: 5px; padding: 5px 8px; width: 210px; font-size: 12px;
-  }
-  #banner {
-    display: none; padding: 8px 18px; background: #4a2f2f; color: #f0c0c0; font-size: 13px;
-  }
-  #banner.show { display: block; }
-  #board {
-    display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px;
-    padding: 14px 18px; align-items: start;
-  }
-  .col { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; min-height: 120px; }
-  .col h2 {
-    font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim);
-    margin: 0; padding: 9px 12px; border-bottom: 1px solid var(--border);
-    display: flex; justify-content: space-between;
-  }
-  .col h2 .count { color: var(--text); }
-  .cards { padding: 8px; display: flex; flex-direction: column; gap: 8px; }
-  .card {
-    background: var(--card); border: 1px solid var(--border); border-radius: 6px;
-    padding: 8px 10px; cursor: pointer;
-  }
-  .card:hover { border-color: var(--accent); }
-  .card .title { font-size: 13px; margin-bottom: 5px; word-break: break-word; }
-  .badges { display: flex; gap: 5px; flex-wrap: wrap; }
-  .badge {
-    font-size: 10px; padding: 1px 7px; border-radius: 9px;
-    background: var(--panel); color: var(--dim); border: 1px solid var(--border);
-  }
-  .badge.sev { color: #10141a; border: none; font-weight: 600; }
-  .badge.fail { background: #4a2f2f; color: #f0c0c0; border-color: #6a4040; }
-  .badge.mode { color: var(--warn); border-color: var(--warn); }
-  .badge.done { color: var(--ok); border-color: var(--ok); }
-  .badge.big { font-size: 11px; padding: 3px 9px; }
-  /* Detail drawer */
-  #overlay {
-    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 10;
-  }
-  #overlay.show { display: block; }
-  #detail {
-    position: fixed; top: 0; right: 0; bottom: 0; width: min(680px, 95vw);
-    background: var(--panel); border-left: 1px solid var(--border);
-    padding: 18px; overflow-y: auto; z-index: 11; display: none;
-  }
-  #detail.show { display: block; }
-  #detail h2 { margin: 0 0 4px; font-size: 16px; }
-  #detail .meta { color: var(--dim); font-size: 12px; margin-bottom: 12px; }
-  #detail section { margin: 14px 0; }
-  #detail section h3 {
-    font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
-    color: var(--dim); margin: 0 0 6px;
-  }
-  #detail pre {
-    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
-    padding: 10px; overflow-x: auto; font-size: 12px; white-space: pre-wrap;
-  }
-  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
-  button {
-    background: var(--card); border: 1px solid var(--border); color: var(--text);
-    border-radius: 6px; padding: 7px 13px; font-size: 13px; cursor: pointer;
-  }
-  button:hover { border-color: var(--accent); }
-  button.primary { background: #1d4066; border-color: #2b5a8c; }
-  button.danger-confirm { background: #5c3b1e; border-color: var(--warn); }
-  .analysis-chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0 2px; align-items: center; }
-  .reconfirm {
-    display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap;
-    background: #3a2f1e; border: 1px solid var(--warn); border-radius: 6px; padding: 4px 6px 4px 10px;
-  }
-  select {
-    background: var(--card); border: 1px solid var(--border); color: var(--text);
-    border-radius: 6px; padding: 6px 8px; font-size: 13px;
-  }
-  #toast {
-    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
-    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-    padding: 9px 16px; font-size: 13px; display: none; z-index: 20; max-width: 80vw;
-  }
-  #toast.show { display: block; }
-  #toast.err { border-color: var(--err); }
-  #close-detail { float: right; }
-  .kv { color: var(--dim); } .kv b { color: var(--text); font-weight: 500; }
-  @media (max-width: 1100px) { #board { grid-template-columns: repeat(2, 1fr); } }
-</style>
-</head>
-<body>
-<header>
-  <h1>🐛 Bugalizer</h1>
-  <span id="poll-dot"></span><span id="poll-info">connecting…</span>
-  <span id="usage"></span>
-  <span id="key-box">
-    <input id="api-key" type="password" placeholder="API key (X-API-Key)" autocomplete="off">
-  </span>
-</header>
-<div id="banner"></div>
-<main id="board"></main>
-
-<div id="overlay"></div>
-<aside id="detail"></aside>
-<div id="toast"></div>
-
-<script>
 "use strict";
-const $ = (s, el=document) => el.querySelector(s);
+/* Bugalizer queue dashboard (§5.4 + §5b Cycle 1).
+ *
+ * Design spine (§5b.1): everywhere analysis appears, show WHICH TIER did the
+ * work — local LLM (emerald, free) vs cloud AI (violet, paid) — and WHAT
+ * ALREADY RAN, so a re-scan is always a deliberate choice.
+ */
+const $ = (s, el = document) => el.querySelector(s);
 const POLL_MS = 5000;
 
 // Column layout: plan §5.4 — submitted → triaged → analyzing → fix_proposed → terminal.
@@ -144,10 +17,17 @@ const COLUMNS = [
   { key: "terminal",     label: "Terminal",     statuses: ["closed", "rejected", "duplicate"] },
 ];
 
+// Tier identity (§5b.1): ollama = local (free); any other provider = cloud (paid).
+function tierOf(provider) {
+  if (!provider) return null;
+  return provider === "ollama" ? "local" : "cloud";
+}
+const TIER_LABEL = { local: "local", cloud: "cloud" };
+
 let apiKey = localStorage.getItem("bugalizer_api_key") || "";
 let projects = {};          // id -> name
 let openReportId = null;    // detail drawer state
-let cloudArmed = false;     // two-click confirm for the paid button
+let cloudArmed = false;     // inline confirm for the paid cloud call
 let localArmed = false;     // inline confirm for re-analyzing an analyzed report
 let pollFailures = 0;       // consecutive failed polls — debounce the "offline" banner
 let detailReady = false;    // drawer has rendered good content at least once
@@ -170,7 +50,7 @@ async function api(path, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Board rendering
+// Rendering helpers
 // ---------------------------------------------------------------------------
 
 function esc(s) {
@@ -186,21 +66,53 @@ function age(iso) {
   return Math.round(s / 86400) + "d";
 }
 
+// Scan-state chip: "✓ local 12m" — which tier already ran, and how fresh.
+function tierChip(tier, at, big = false) {
+  const cls = big ? "chip big" : "chip";
+  if (!at) return `<span class="${cls} off">○ ${TIER_LABEL[tier]}</span>`;
+  return `<span class="${cls} tier-${tier}" title="Last completed ${TIER_LABEL[tier]} analysis">` +
+         `<span class="led ${tier}"></span>✓ ${TIER_LABEL[tier]} ${age(at)}</span>`;
+}
+
+// Section provenance chip: tier LED + model + age, from an analyses row.
+function runChip(run) {
+  if (!run) return "";
+  const tier = tierOf(run.llm_provider);
+  if (!tier) return "";
+  const when = run.completed_at || run.created_at;
+  return `<span class="chip tier-${tier}"><span class="led ${tier}"></span>` +
+         `${TIER_LABEL[tier]} · ${esc(run.llm_model || run.llm_provider)} · ${age(when)}</span>`;
+}
+
+// ---------------------------------------------------------------------------
+// Board
+// ---------------------------------------------------------------------------
+
 function cardHtml(r) {
   const badges = [
-    `<span class="badge sev" style="background:var(--sev-${esc(r.severity)},var(--dim))">${esc(r.severity)}</span>`,
+    `<span class="badge sev" style="background:var(--sev-${esc(r.severity)},var(--text-muted))">${esc(r.severity)}</span>`,
     `<span class="badge">${esc(projects[r.project_id] || r.project_id)}</span>`,
     `<span class="badge">${age(r.created_at)}</span>`,
   ];
   if (r.analysis_mode && r.analysis_mode !== "auto")
     badges.push(`<span class="badge mode">${esc(r.analysis_mode)}</span>`);
-  if (r.localized)
-    badges.push(`<span class="badge done" title="Localized — analyzed locally">✓ localized</span>`);
+  // What already ran, at whose cost (§5b.1): only show tiers that have run.
+  if (r.last_local_analysis_at) badges.push(tierChip("local", r.last_local_analysis_at));
+  if (r.last_cloud_analysis_at) badges.push(tierChip("cloud", r.last_cloud_analysis_at));
   if (r.failed_stage)
     badges.push(`<span class="badge fail" title="${esc(r.last_error)}">⚠ ${esc(r.failed_stage)} failed</span>`);
-  const nonDefault = !COLUMNS.some(c => c.statuses[0] === r.status);
-  if (nonDefault) badges.push(`<span class="badge">${esc(r.status)}</span>`);
-  return `<div class="card" data-id="${esc(r.id)}">
+
+  let cardCls = "card";
+  if (r.status === "clarification_needed") {
+    cardCls += " attn";
+    badges.push(`<span class="badge attn">? needs input</span>`);
+  } else if (r.status === "deferred") {
+    cardCls += " dim";
+    badges.push(`<span class="badge">deferred</span>`);
+  } else if (!COLUMNS.some(c => c.statuses[0] === r.status)) {
+    badges.push(`<span class="badge">${esc(r.status)}</span>`);
+  }
+  return `<div class="${cardCls}" data-id="${esc(r.id)}">
     <div class="title">${esc(r.title)}</div>
     <div class="badges">${badges.join("")}</div>
   </div>`;
@@ -211,8 +123,11 @@ function renderBoard(reports, counts) {
   board.innerHTML = COLUMNS.map(col => {
     const rows = reports.filter(r => col.statuses.includes(r.status));
     const count = col.statuses.reduce((n, s) => n + (counts[s] || 0), 0);
+    const attn = counts["clarification_needed"] || 0;
+    const attnHtml = (col.statuses.includes("clarification_needed") && attn)
+      ? `<span class="attn-count" title="reports needing human input">? ${attn}</span>` : "";
     return `<div class="col">
-      <h2>${col.label} <span class="count">${count}</span></h2>
+      <h2>${col.label} <span class="count">${count}</span>${attnHtml}</h2>
       <div class="cards">${rows.map(cardHtml).join("") || ""}</div>
     </div>`;
   }).join("");
@@ -310,8 +225,7 @@ async function refreshDetail(id) {
     try { localization = await api(`/reports/${id}/localization`); } catch (e) { /* none yet */ }
   } catch (e) {
     // Keep the last-good drawer through a transient blip; only surface an error
-    // if we never managed to load it (so the detail text doesn't vanish and
-    // reappear every poll while the connection flaps).
+    // if we never managed to load it.
     if (!detailReady) {
       $("#detail").innerHTML = `<p class="kv">Failed to load report: ${esc(e.message)}</p>`;
     }
@@ -322,10 +236,40 @@ async function refreshDetail(id) {
   renderDetail(report, analyses.analyses, localization, fixes.fix_proposals);
 }
 
+function latestCompleted(analyses, phase) {
+  return analyses.find(a => a.phase === phase && a.status === "completed") || null;
+}
+
+// Formatted triage (§5b.2) — no more raw JSON dump. Clarification questions
+// are the main human action item; they get the prominent amber block.
 function triageSection(analyses) {
-  const t = analyses.find(a => a.phase === "triage" && a.status === "completed");
+  const t = latestCompleted(analyses, "triage");
   if (!t || !t.result) return `<p class="kv">No triage result yet.</p>`;
-  return `<pre>${esc(JSON.stringify(t.result, null, 2))}</pre>`;
+  const res = t.result;
+  const known = new Set(["severity", "category", "confidence", "summary",
+                         "needs_clarification", "clarification_questions"]);
+  const rows = [];
+  if (res.severity) rows.push(["severity",
+    `<span class="badge sev" style="background:var(--sev-${esc(res.severity)},var(--text-muted))">${esc(res.severity)}</span>`]);
+  if (res.category) rows.push(["category", esc(res.category)]);
+  if (typeof res.confidence === "number")
+    rows.push(["confidence", `${Math.round(res.confidence * 100)}%`]);
+  for (const [k, v] of Object.entries(res)) {
+    if (known.has(k) || v == null || typeof v === "object") continue;
+    rows.push([esc(k), esc(String(v))]);
+  }
+  const grid = rows.length
+    ? `<dl class="triage-grid">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>` : "";
+  const summary = res.summary ? `<p>${esc(res.summary)}</p>` : "";
+  const questions = (res.clarification_questions || []).filter(Boolean);
+  const clarify = (res.needs_clarification || questions.length)
+    ? `<div class="clarify">
+         <div class="clarify-head">? Needs clarification</div>
+         ${questions.length
+           ? `<ol>${questions.map(q => `<li>${esc(q)}</li>`).join("")}</ol>`
+           : `<span class="kv">The model asked for clarification but returned no questions.</span>`}
+       </div>` : "";
+  return grid + summary + clarify;
 }
 
 function localizationSection(loc) {
@@ -340,14 +284,58 @@ function localizationSection(loc) {
          `</p><ul>${cands || "<li class='kv'>no candidates</li>"}</ul>`;
 }
 
+// Client-side unified-diff colorization (§5b.2) — no dependencies.
+function renderDiff(diff) {
+  const lines = String(diff || "").split("\n").map(line => {
+    let cls = "";
+    if (line.startsWith("+++") || line.startsWith("---")) cls = "diff-file";
+    else if (line.startsWith("@@")) cls = "diff-hunk";
+    else if (line.startsWith("+")) cls = "diff-add";
+    else if (line.startsWith("-")) cls = "diff-del";
+    else if (line.startsWith("diff ") || line.startsWith("index ")) cls = "diff-meta";
+    return `<code class="${cls}">${esc(line) || " "}</code>`;
+  });
+  return `<pre class="diff">${lines.join("")}</pre>`;
+}
+
 function fixSection(fixes) {
   if (!fixes.length) return `<p class="kv">No fix proposals yet.</p>`;
   return fixes.map(f => `
     <p class="kv">confidence <b>${f.confidence}</b> · files <b>${esc((f.files_changed || []).join(", "))}</b>
-       · ${esc(f.created_at)}</p>
+       · ${age(f.created_at)} ago</p>
     <p>${esc(f.root_cause)}</p>
     <p class="kv">${esc(f.explanation)}</p>
-    <pre>${esc(f.diff)}</pre>`).join("<hr>");
+    ${renderDiff(f.diff)}`).join("<hr>");
+}
+
+// Run history (§5b.2): every analysis row — stage, tier, model, duration,
+// tokens, cost, outcome. The audit trail behind the scan-state chips.
+function timelineSection(analyses) {
+  if (!analyses.length) return `<p class="kv">No analysis runs yet.</p>`;
+  const rows = analyses.map(a => {
+    const tier = tierOf(a.llm_provider);
+    const led = tier ? `<span class="led ${tier}"></span>` : `<span class="led steel"></span>`;
+    const model = a.llm_model ? esc(a.llm_model) : "—";
+    let dur = "—";
+    if (a.started_at && a.completed_at) {
+      const s = (new Date(a.completed_at) - new Date(a.started_at)) / 1000;
+      dur = s < 60 ? `${s.toFixed(1)}s` : `${Math.round(s / 60)}m${Math.round(s % 60)}s`;
+    }
+    const tokens = (a.prompt_tokens || 0) + (a.completion_tokens || 0);
+    const cost = a.estimated_cost_usd ? ` · $${a.estimated_cost_usd.toFixed(4)}` : "";
+    const failed = a.status === "failed";
+    const err = failed && a.result && a.result.error
+      ? `<span class="err-txt">${esc(String(a.result.error).slice(0, 200))}</span>` : "";
+    return `<div class="run-row${failed ? " failed" : ""}">
+      ${led}<span class="phase">${esc(a.phase)}</span>
+      <span class="muted">${model}</span>
+      <span class="muted">${dur}</span>
+      <span class="muted">${tokens.toLocaleString()} tok${cost}</span>
+      <span class="right">${esc(a.status)} · ${age(a.completed_at || a.created_at)} ago</span>
+      ${err}
+    </div>`;
+  });
+  return `<div class="timeline">${rows.join("")}</div>`;
 }
 
 function renderDetail(r, analyses, loc, fixes) {
@@ -358,24 +346,24 @@ function renderDetail(r, analyses, loc, fixes) {
     // capable cloud provider. Keep this calm and actionable, not alarming.
     failure = `<section><h3>Automated fix</h3><p class="kv">No automated fix was
       generated for this report. Triage and localization are unaffected. A fix
-      proposal needs a capable cloud fix provider — use <b>Analyze (cloud)</b>
+      proposal needs a capable cloud fix provider — use <b>Analyze (cloud · $)</b>
       once one is configured.</p></section>`;
   } else if (r.failed_stage) {
     failure = `<section><h3>Failure</h3><p class="badge fail">⚠ ${esc(r.failed_stage)}</p>
        <pre>${esc(r.last_error || "")}</pre></section>`;
   }
-  // Analysis state, at a glance. "Analyzed locally" = a completed localization
-  // exists (which implies triage ran). Drives both the status chips and whether
-  // the local button is a first-run or a guarded re-run.
-  const triageDone = analyses.some(a => a.phase === "triage" && a.status === "completed");
-  const locDone = analyses.find(a => a.phase === "localization" && a.status === "completed");
+  // "Analyzed" = a completed localization exists (implies triage ran) —
+  // drives whether the local button is a first-run or a guarded re-run.
+  const locDone = latestCompleted(analyses, "localization");
   const analyzed = !!locDone;
-  const locWhen = locDone ? age(locDone.completed_at || locDone.created_at) : null;
-  const chip = (on, label) => `<span class="badge big ${on ? "done" : ""}">${on ? "✓" : "○"} ${label}</span>`;
+
   const chips = `<div class="analysis-chips">
-    ${chip(triageDone, "Triaged")}
-    ${chip(analyzed, analyzed ? `Localized · ${locWhen} ago` : "Not localized")}
+    ${tierChip("local", r.last_local_analysis_at, true)}
+    ${tierChip("cloud", r.last_cloud_analysis_at, true)}
   </div>`;
+
+  const triageRun = latestCompleted(analyses, "triage");
+  const fixRun = latestCompleted(analyses, "fix");
 
   $("#detail").innerHTML = `
     <button id="close-detail">✕</button>
@@ -387,9 +375,11 @@ function renderDetail(r, analyses, loc, fixes) {
     ${chips}
     <div class="actions">
       <span id="local-slot">
-        <button id="act-local" class="primary">${analyzed ? "Re-analyze (local)" : "Analyze (local)"}</button>
+        <button id="act-local" class="tier-local">${analyzed ? "Re-analyze (local · free)" : "Analyze (local · free)"}</button>
       </span>
-      <button id="act-cloud">Analyze (cloud)</button>
+      <span id="cloud-slot">
+        <button id="act-cloud" class="tier-cloud">Analyze (cloud · $)</button>
+      </span>
       <button id="act-retry">Retry</button>
       <label class="kv">mode
         <select id="mode-select">
@@ -400,21 +390,21 @@ function renderDetail(r, analyses, loc, fixes) {
     </div>
     ${failure}
     <section><h3>Description</h3><pre>${esc(r.description)}</pre></section>
-    <section><h3>Triage</h3>${triageSection(analyses)}</section>
-    <section><h3>Localization</h3>${localizationSection(loc)}</section>
-    <section><h3>Fix proposals</h3>${fixSection(fixes)}</section>
+    <section><h3>Triage ${runChip(triageRun)}</h3>${triageSection(analyses)}</section>
+    <section><h3>Localization ${runChip(locDone)}</h3>${localizationSection(loc)}</section>
+    <section><h3>Fix proposals ${runChip(fixRun)}</h3>${fixSection(fixes)}</section>
+    <section><h3>Run history</h3>${timelineSection(analyses)}</section>
   `;
   $("#close-detail").addEventListener("click", closeDetail);
   bindLocalButton(r.id, analyzed);
-  $("#act-cloud").addEventListener("click", ev => confirmCloud(ev.target, r.id));
+  bindCloudButton(r.id, r.last_cloud_analysis_at);
   $("#act-retry").addEventListener("click", () => doRetry(r.id));
   $("#mode-select").addEventListener("change", ev => doSetMode(r.id, ev.target.value));
 }
 
 // Local analysis button. First run fires immediately (expected action, no
-// friction). A re-run on an already-analyzed report arms an inline confirm with
-// an explicit Cancel, so a second, redundant analysis is deliberate — not a
-// stray click.
+// friction — it's free). A re-run on an already-analyzed report arms an inline
+// confirm with an explicit Cancel, so a redundant analysis is deliberate.
 function bindLocalButton(id, analyzed) {
   const btn = $("#act-local");
   if (!btn) return;
@@ -429,7 +419,7 @@ function bindLocalButton(id, analyzed) {
     </span>`;
     const disarm = () => {
       localArmed = false;
-      slot.innerHTML = `<button id="act-local" class="primary">Re-analyze (local)</button>`;
+      slot.innerHTML = `<button id="act-local" class="tier-local">Re-analyze (local · free)</button>`;
       bindLocalButton(id, true);
     };
     $("#local-yes").addEventListener("click", () => { localArmed = false; doAnalyze(id, "local"); });
@@ -438,21 +428,31 @@ function bindLocalButton(id, analyzed) {
   });
 }
 
-// Two-click confirm for the paid cloud call (no blocking dialogs).
-function confirmCloud(btn, id) {
-  if (!cloudArmed) {
+// Cloud analysis is a paid API call — it NEVER fires from a single click
+// (§5b success criterion 2). The inline confirm states the cost, and if a
+// cloud run already exists, its age — so a redundant paid re-run is explicit.
+function bindCloudButton(id, lastCloudAt) {
+  const btn = $("#act-cloud");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
     cloudArmed = true;
-    btn.textContent = "Confirm cloud call ($)";
-    btn.classList.add("danger-confirm");
-    setTimeout(() => {
+    const slot = $("#cloud-slot");
+    const already = lastCloudAt
+      ? ` Cloud already ran <b>${age(lastCloudAt)} ago</b> — run again?` : "";
+    slot.innerHTML = `<span class="reconfirm">
+      <span class="kv">$ Cloud analysis is a paid API call.${already}</span>
+      <button id="cloud-yes" class="danger-confirm">Yes, run cloud ($)</button>
+      <button id="cloud-no">Cancel</button>
+    </span>`;
+    const disarm = () => {
       cloudArmed = false;
-      btn.textContent = "Analyze (cloud)";
-      btn.classList.remove("danger-confirm");
-    }, 4000);
-    return;
-  }
-  cloudArmed = false;
-  doAnalyze(id, "cloud");
+      slot.innerHTML = `<button id="act-cloud" class="tier-cloud">Analyze (cloud · $)</button>`;
+      bindCloudButton(id, lastCloudAt);
+    };
+    $("#cloud-yes").addEventListener("click", () => { cloudArmed = false; doAnalyze(id, "cloud"); });
+    $("#cloud-no").addEventListener("click", disarm);
+    setTimeout(() => { if (cloudArmed) disarm(); }, 8000);  // auto-cancel if ignored
+  });
 }
 
 async function doAnalyze(id, tier) {
@@ -501,11 +501,15 @@ $("#api-key").addEventListener("change", ev => {
   localStorage.setItem("bugalizer_api_key", apiKey);
   refresh();
 });
+$("#theme-toggle").addEventListener("click", () => {
+  const root = document.documentElement;
+  const next = root.dataset.theme === "light" ? "slate" : "light";
+  if (next === "light") root.dataset.theme = "light";
+  else delete root.dataset.theme;
+  try { localStorage.setItem("bugalizer_theme", next); } catch (e) { /* fine */ }
+});
 $("#overlay").addEventListener("click", closeDetail);
 document.addEventListener("keydown", ev => { if (ev.key === "Escape") closeDetail(); });
 
 refresh();
 setInterval(refresh, POLL_MS);
-</script>
-</body>
-</html>

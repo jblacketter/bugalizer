@@ -26,7 +26,7 @@ from bugalizer.pipeline.localizer import localize_report, read_candidate_files, 
 @pytest.fixture(autouse=True)
 def fresh_db():
     from bugalizer import db
-    db._conn = None
+    db.reset_conn()
     os.environ["BUGALIZER_DB_PATH"] = ":memory:"
     from bugalizer.config import settings
     settings.db_path = ":memory:"
@@ -401,7 +401,7 @@ def test_migration_adds_head_sha_to_legacy_schema():
     from bugalizer import db
 
     # Reset connection
-    db._conn = None
+    db.reset_conn()
 
     # Create a legacy schema DB without head_sha
     conn = sqlite3.connect(":memory:")
@@ -521,4 +521,4 @@ def test_migration_adds_head_sha_to_legacy_schema():
     assert len(eligible) == 1
 
     # Reset for other tests
-    db._conn = None
+    db.reset_conn()

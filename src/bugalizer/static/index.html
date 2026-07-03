@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bugalizer — Queue</title>
+<script>
+/* Apply the saved theme before first paint (Slate dark is the default). */
+try {
+  var t = localStorage.getItem("bugalizer_theme");
+  if (t === "light") document.documentElement.dataset.theme = "light";
+} catch (e) { /* storage unavailable — keep default */ }
+</script>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header>
+  <h1>🐛 Bugalizer</h1>
+  <span id="poll-dot"></span><span id="poll-info">connecting…</span>
+  <span id="tier-legend" title="Every analysis is labeled with the tier that ran it">
+    <span class="legend-item"><span class="led local"></span>Local <em>free</em></span>
+    <span class="legend-item"><span class="led cloud"></span>Cloud <em>$ API</em></span>
+  </span>
+  <span id="usage"></span>
+  <button id="theme-toggle" title="Toggle Slate / Mist theme">◐ theme</button>
+  <span id="key-box">
+    <input id="api-key" type="password" placeholder="API key (X-API-Key)" autocomplete="off">
+  </span>
+</header>
+<div id="banner"></div>
+<main id="board"></main>
+
+<div id="overlay"></div>
+<aside id="detail"></aside>
+<div id="toast"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

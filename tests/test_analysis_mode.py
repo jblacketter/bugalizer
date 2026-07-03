@@ -45,7 +45,7 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def fresh_db():
-    db._conn = None
+    db.reset_conn()
     os.environ["BUGALIZER_DB_PATH"] = ":memory:"
     settings.db_path = ":memory:"
     settings.queue_enabled = False
@@ -458,7 +458,7 @@ def test_migration_adds_s53_columns_to_legacy_schema():
     pre-existing report rows read back as mode 'auto' (today's behavior)."""
     import sqlite3
 
-    db._conn = None
+    db.reset_conn()
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""

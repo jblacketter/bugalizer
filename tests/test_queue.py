@@ -27,7 +27,7 @@ from bugalizer.llm.client import LLMResponse
 @pytest.fixture(autouse=True)
 def fresh_db():
     from bugalizer import db
-    db._conn = None
+    db.reset_conn()
     os.environ["BUGALIZER_DB_PATH"] = ":memory:"
     from bugalizer.config import settings
     settings.db_path = ":memory:"
@@ -516,3 +516,43 @@ def test_report_failure_info_reports_latest_failed_stage(tmp_path):
     # A later completed localization clears the failure from the report view.
     analysis_create(r["id"], "localization", "completed", result={"repo_sha": "h1"})
     assert report_failure_info(r["id"]) is None
+
+
+# ---------------------------------------------------------------------------
+# Connection threading (§5b regression)
+# ---------------------------------------------------------------------------
+
+def test_file_db_connections_are_per_thread(tmp_path):
+    """File DBs must hand each thread its OWN connection: this Python's sqlite3
+    may be built with threadsafety=1, where concurrent statements on a shared
+    connection corrupt the heap (SIGSEGV under the dashboard's parallel polls).
+    :memory: DBs keep the shared connection — separate connections would see
+    separate empty databases."""
+    import threading
+    from bugalizer import db
+    from bugalizer.config import settings
+
+    settings.db_path = str(tmp_path / "threads.db")
+    db.reset_conn()
+    init_db()
+    try:
+        main_conn = db._get_conn()
+        assert db._get_conn() is main_conn  # stable within a thread
+
+        seen = {}
+        def grab(i):
+            seen[i] = id(db._get_conn())
+        threads = [threading.Thread(target=grab, args=(i,)) for i in range(4)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+
+        assert len(set(seen.values())) == len(seen)          # one conn per thread
+        assert id(main_conn) not in seen.values()            # none shared with main
+
+        # reset_conn invalidates this thread's cached connection too.
+        db.reset_conn()
+        init_db()
+        assert db._get_conn() is not main_conn
+    finally:
+        settings.db_path = ":memory:"
+        db.reset_conn()

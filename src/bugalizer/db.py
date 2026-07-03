@@ -17,7 +17,9 @@ from bugalizer.config import settings
 
 logger = logging.getLogger(__name__)
 
-_conn: Optional[sqlite3.Connection] = None
+_conn: Optional[sqlite3.Connection] = None   # shared conn — :memory: DBs only (tests)
+_local = threading.local()                   # per-thread conns for file DBs
+_generation = 0                              # bumped by reset_conn() to invalidate all
 
 # Async lock for serializing DB writes from queue workers.
 db_write_lock = asyncio.Lock()
@@ -49,14 +51,57 @@ def retry_on_locked(fn: Callable[..., T]) -> Callable[..., T]:
     return wrapper
 
 
+def _configure(conn: sqlite3.Connection) -> sqlite3.Connection:
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def reset_conn() -> None:
+    """Invalidate every cached connection (tests swap BUGALIZER_DB_PATH).
+
+    Bumps the generation so each thread lazily discards its cached connection
+    on next use — connections owned by other threads must not be closed from
+    here (that's itself a cross-thread use).
+    """
+    global _conn, _generation
+    _generation += 1
+    if _conn is not None:
+        _conn.close()
+        _conn = None
+    cached = getattr(_local, "conn", None)
+    if cached is not None:
+        cached.close()
+        _local.conn = None
+
+
 def _get_conn() -> sqlite3.Connection:
+    """Connection for the current thread.
+
+    A sqlite3.Connection must never be used by two threads at once: CPython's
+    sqlite3 can run with threadsafety=1 (e.g. macOS system libsqlite3), where
+    concurrent statements on a shared connection corrupt the heap — the
+    dashboard's parallel polls through FastAPI's threadpool did exactly that
+    (SIGSEGV in sqlite3Prepare / "database disk image is malformed").
+
+    File DBs therefore get one connection per thread (cheap under WAL; write
+    contention is covered by the busy timeout + retry_on_locked). `:memory:`
+    DBs (tests) can't be shared across connections, so they keep the single
+    shared connection — safe there because TestClient serializes requests.
+    """
     global _conn
-    if _conn is None:
-        _conn = sqlite3.connect(settings.db_path, check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA journal_mode=WAL")
-        _conn.execute("PRAGMA foreign_keys=ON")
-    return _conn
+    if settings.db_path == ":memory:":
+        if _conn is None:
+            _conn = _configure(sqlite3.connect(settings.db_path, check_same_thread=False))
+        return _conn
+    cached = getattr(_local, "conn", None)
+    if cached is None or getattr(_local, "generation", None) != _generation:
+        if cached is not None:
+            cached.close()
+        _local.conn = _configure(sqlite3.connect(settings.db_path, timeout=10))
+        _local.generation = _generation
+    return _local.conn
 
 
 def init_db() -> None:
@@ -983,6 +1028,35 @@ def report_ids_with_localization() -> set[str]:
         "WHERE phase = 'localization' AND status = 'completed'"
     ).fetchall()
     return {row["bug_report_id"] for row in rows}
+
+
+def report_tier_summary(
+    bug_report_id: Optional[str] = None,
+) -> dict[str, dict[str, Optional[str]]]:
+    """Latest completed LLM-analysis timestamp per tier, keyed by report ID.
+
+    Tier is derived from the analysis row's ``llm_provider``: ``ollama`` is
+    the local (free) tier; any other non-null provider is a paid cloud tier
+    (§5b.1 scan-state chips). One aggregate query for the whole board — the
+    reports list must not do an N+1 per-card lookup.
+    """
+    conn = _get_conn()
+    query = (
+        "SELECT bug_report_id, "
+        "  MAX(CASE WHEN llm_provider = 'ollama' THEN completed_at END) AS local_at, "
+        "  MAX(CASE WHEN llm_provider IS NOT NULL AND llm_provider != 'ollama' "
+        "      THEN completed_at END) AS cloud_at "
+        "FROM analyses WHERE status = 'completed' AND completed_at IS NOT NULL"
+    )
+    params: tuple[str, ...] = ()
+    if bug_report_id is not None:
+        query += " AND bug_report_id = ?"
+        params = (bug_report_id,)
+    query += " GROUP BY bug_report_id"
+    return {
+        row["bug_report_id"]: {"local": row["local_at"], "cloud": row["cloud_at"]}
+        for row in conn.execute(query, params).fetchall()
+    }
 
 
 def reset_triage_retries(bug_report_id: str) -> bool:

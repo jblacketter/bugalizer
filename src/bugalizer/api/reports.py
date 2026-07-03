@@ -19,6 +19,7 @@ from bugalizer.db import (
     report_get,
     report_ids_with_localization,
     report_list,
+    report_tier_summary,
     report_update_fields,
     report_update_status,
 )
@@ -141,10 +142,15 @@ def list_reports(
         limit=limit, offset=offset, order=order,
     )
     localized_ids = report_ids_with_localization()
+    tiers = report_tier_summary()
     responses = []
     for r in rows:
         resp = _row_to_response(r)
         resp.localized = r["id"] in localized_ids
+        tier = tiers.get(r["id"])
+        if tier:
+            resp.last_local_analysis_at = tier["local"]
+            resp.last_cloud_analysis_at = tier["cloud"]
         failure = report_failure_info(r["id"])
         if failure:
             resp.failed_stage = failure["failed_stage"]
@@ -167,6 +173,10 @@ def get_report(
         raise HTTPException(status_code=404, detail="Bug report not found")
     resp = _row_to_response(row)
     resp.localized = latest_completed_localization(report_id) is not None
+    tier = report_tier_summary(report_id).get(report_id)
+    if tier:
+        resp.last_local_analysis_at = tier["local"]
+        resp.last_cloud_analysis_at = tier["cloud"]
     failure = report_failure_info(report_id)
     if failure:
         resp.failed_stage = failure["failed_stage"]

@@ -43,13 +43,23 @@ tree-sitter / uv
   - `FIX_PROPOSING` claim state; `GET /reports/{id}/fix_proposals`; `QA_LLM_*` fallback layer
 
 ### Phase 5: Deployment Readiness & Queue Dashboard
-- **Status:** Planned (`docs/phases/phase-5-deployment-readiness.md`)
+- **Status:** Complete — hosting milestone closed 2026-07-02 (`docs/phases/phase-5-deployment-readiness.md`)
 - **Description:** Make the service safe to host permanently on the LAN, with a queue
   dashboard and per-report local-vs-cloud analysis choice.
 - **Key Deliverables:**
   - Stage 3/4 retry caps + real health check; security defaults (keys, CORS)
   - Per-report analysis tier (`local` / `cloud`); minimal web dashboard
-  - Docker/service packaging + Windows LAN deploy guide
+  - Docker/service packaging + Windows LAN deploy guide — live at `https://bugalizer.lan/`
+
+### Phase 5b: Dashboard UX & Tier Clarity
+- **Status:** Plan review (`docs/phases/phase-5b-dashboard-ux.md`)
+- **Description:** Make the dashboard a genuinely good operator UI: unmistakable local-vs-cloud
+  tier identity (free vs paid), visible "already scanned" state, readable results, and no
+  curl-only workflows. Fake bug reports as working material.
+- **Key Deliverables:**
+  - Aegis "Control Room" design language (Slate/Mist themes, steel/emerald/violet tier chips)
+  - Formatted triage + clarification questions, colorized diffs, run-history timeline
+  - Health strip, filters, project management UI, bug submission form
 
 ### Phase 6: Integrations
 - **Status:** Not Started

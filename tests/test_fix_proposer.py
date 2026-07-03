@@ -41,7 +41,7 @@ def _failed_fix_rows(report_id: str) -> list:
 
 @pytest.fixture(autouse=True)
 def fresh_db():
-    db._conn = None
+    db.reset_conn()
     os.environ["BUGALIZER_DB_PATH"] = ":memory:"
     settings.db_path = ":memory:"
     settings.queue_enabled = False
