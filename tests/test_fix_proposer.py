@@ -227,6 +227,47 @@ async def test_propose_fix_happy_path(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_propose_fix_resolves_default_project_to_cloud(tmp_path):
+    """ACCEPTANCE (§5.3): a default project (llm_provider=ollama, fix_llm_*
+    NULL) sends Stage 4 to the global cloud fix provider — never Ollama."""
+    report, _ = _seed_fixture_report(tmp_path)
+
+    mock_llm = AsyncMock(
+        return_value=_make_llm_response_for_proposal(_valid_proposal_payload())
+    )
+    with patch("bugalizer.pipeline.fix_proposer.llm_client.complete", new=mock_llm):
+        await propose_fix(report["id"])
+
+    kwargs = mock_llm.await_args.kwargs
+    assert kwargs["provider"] == settings.fix_provider == "anthropic"
+    assert kwargs["model"] == settings.default_fix_model
+
+
+@pytest.mark.asyncio
+async def test_propose_fix_honors_project_fix_llm_override(tmp_path):
+    """ACCEPTANCE (§5.3): per-project fix_llm_provider/fix_llm_model reach
+    the Stage 4 LLM call; the local llm_* pair is never consulted."""
+    report, _ = _seed_fixture_report(tmp_path)
+    db.project_update(
+        report["project_id"],
+        llm_provider="ollama",  # local pair stays ollama — must not leak
+        fix_llm_provider="openai",
+        fix_llm_model="gpt-4o",
+    )
+
+    mock_llm = AsyncMock(
+        return_value=_make_llm_response_for_proposal(_valid_proposal_payload())
+    )
+    with patch("bugalizer.pipeline.fix_proposer.llm_client.complete", new=mock_llm):
+        await propose_fix(report["id"])
+
+    kwargs = mock_llm.await_args.kwargs
+    assert kwargs["provider"] == "openai"
+    assert kwargs["model"] == "gpt-4o"
+    assert report_get(report["id"])["status"] == "fix_proposed"
+
+
+@pytest.mark.asyncio
 async def test_propose_fix_idempotent_on_same_analysis(tmp_path):
     """Second run for the same (report, analysis) must not create a duplicate."""
     report, analysis = _seed_fixture_report(tmp_path)

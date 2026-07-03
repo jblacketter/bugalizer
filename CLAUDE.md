@@ -6,7 +6,7 @@ AI-powered bug report processing server. Accepts structured bug reports via REST
 ## Quick Start
 ```bash
 uv sync --dev
-uv run pytest                # 139 tests, all should pass
+uv run pytest                # 185 tests, all should pass
 
 # Run the server
 BUGALIZER_DB_PATH=bugalizer.db uv run uvicorn bugalizer.main:app --port 8090
@@ -59,8 +59,11 @@ tests/
 - **Phase 1 (Foundation): COMPLETE** — API, DB, auth, workflow, tests (30/30)
 - **Phase 2 (Local LLM Pipeline): COMPLETE** — Ollama triage, async queue worker, duplicate detection, token tracking (66 tests)
 - **Phase 3 (Codebase Analysis): COMPLETE** — Git ops, tree-sitter repo maps, two-pass localization, SHA freshness
-- **Phase 4 (Fix Proposals): IMPLEMENTED — awaiting review** — Anthropic-via-litellm stage generates unified-diff fix proposals with prompt caching; new `FIX_PROPOSING` transient claim state; `GET /reports/{id}/fix_proposals` endpoint; 139 tests passing.
-- Phase 5 (Deployment Readiness + Dashboard): PLANNED — see `docs/phases/phase-5-deployment-readiness.md`
+- **Phase 4 (Fix Proposals): COMPLETE (codex-approved)** — Anthropic-via-litellm stage generates unified-diff fix proposals with prompt caching; `FIX_PROPOSING` transient claim state; SHA-freshness gate before paid calls; `GET /reports/{id}/fix_proposals` endpoint.
+- **Phase 5 (Deployment Readiness + Dashboard): IN PROGRESS** — see `docs/phases/phase-5-deployment-readiness.md`
+  - Cycle 1 (5.1 retry gates + 5.2 security defaults): COMPLETE (codex-approved)
+  - Cycle 2 (5.3 per-report `analysis_mode`, `POST /reports/{id}/analyze`, per-project `fix_llm_*` provider split): IMPLEMENTED — awaiting review
+  - Remaining: Cycle 3 (5.4 dashboard), Cycle 4 (5.5 deployment packaging)
 - Phase 6 (Integrations): NOT STARTED
 
 ## Handoff Workflow
@@ -80,6 +83,8 @@ Uses ai-handoff system: claude (lead) ↔ codex (reviewer). Run `/handoff` to ch
 - `db_write_lock` (asyncio.Lock) serializes worker DB writes
 - `asyncio.to_thread()` wraps blocking git/AST/file ops in async worker paths
 - SHA-based localization freshness: `project.head_sha` vs `localization.repo_sha`
+- Per-report `analysis_mode` (auto/local_only/hold) gates automatic dispatch; manual `POST /reports/{id}/analyze` overrides it
+- LLM resolution namespaces: local stages read project `llm_*`; Stage 4 reads project `fix_llm_*` → global fix settings (`resolve_local_llm`/`resolve_fix_llm` in llm/client.py)
 - Path traversal protection: `_validate_candidate_path()` for LLM-provided file paths
 - Schema migrations in `_migrate()` for backward-compatible column additions
 - LLM calls mocked in tests (no Ollama dependency in CI)

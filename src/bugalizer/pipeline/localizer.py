@@ -101,6 +101,7 @@ async def localize_report(
     repo_path: str,
     *,
     model: str | None = None,
+    provider: str | None = None,
     triage_summary: str | None = None,
 ) -> dict[str, Any]:
     """Run Stage 3 localization on a report.
@@ -109,10 +110,16 @@ async def localize_report(
     1. Send repo map + bug report -> LLM identifies candidate files
     2. If confidence >= threshold, read file contents -> LLM refines to functions/lines
 
+    Provider/model are resolved by the caller (orchestrator) from the
+    project's local `llm_provider`/`llm_model` via
+    `llm.client.resolve_local_llm`; defaults here keep pre-§5.3 behavior.
+
     Returns the localization result dict.
     """
     if model is None:
         model = settings.default_localize_model
+    if provider is None:
+        provider = "ollama"
 
     now = datetime.now(timezone.utc).isoformat()
 
@@ -128,7 +135,7 @@ async def localize_report(
     try:
         # --- Pass 1: Initial localization ---
         messages = format_localize_prompt(report, repo_map_text, triage_summary)
-        llm_response = await complete(model=model, messages=messages)
+        llm_response = await complete(model=model, messages=messages, provider=provider)
         pass1_result = _parse_json_response(llm_response.content)
 
         total_prompt_tokens = llm_response.prompt_tokens
@@ -160,7 +167,9 @@ async def localize_report(
                 confirm_messages = format_localize_confirm_prompt(
                     report, file_contents, triage_summary,
                 )
-                confirm_response = await complete(model=model, messages=confirm_messages)
+                confirm_response = await complete(
+                    model=model, messages=confirm_messages, provider=provider,
+                )
                 pass2_result = _parse_json_response(confirm_response.content)
 
                 total_prompt_tokens += confirm_response.prompt_tokens

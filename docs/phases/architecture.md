@@ -98,9 +98,22 @@ model, so the pair can never mismatch). Triage/localize are local-only: they con
 `QA_LLM_MODEL` only when it is an `ollama/...` string; a cloud model string leaves them alone.
 `QA_LLM_API_BASE` overrides `ollama_host` unless explicitly set.
 
-Per-project `llm_provider` / `llm_model` fields exist on the Project model but are **not yet
-consulted** by the pipeline — wiring them, plus per-report local-vs-cloud selection, is
-Phase 5 §5.3.
+**Per-project overrides (Phase 5 §5.3)** — resolved in `llm/client.py::resolve_local_llm` /
+`resolve_fix_llm`, precedence `per-project override → global setting`, in two separate
+namespaces:
+
+- **Local stages (2–3):** project `llm_provider` / `llm_model` (defaults `ollama` /
+  `qwen2.5-coder:7b`) → global `default_triage_model` / `default_localize_model`. Never
+  consulted by Stage 4.
+- **Stage 4:** project `fix_llm_provider` / `fix_llm_model` (nullable; `NULL` = use global
+  `fix_provider` / `default_fix_model`, per-field). There is no path by which a project's
+  `llm_provider=ollama` reaches Stage 4.
+
+**Per-report analysis tier (Phase 5 §5.3)** — `bug_reports.analysis_mode` gates *automatic*
+worker dispatch: `auto` (default, full pipeline), `local_only` (stops before Stage 4), `hold`
+(validate + dedupe only). `POST /reports/{id}/analyze {"tier": "local"|"cloud"}` dispatches
+manually and overrides the mode for that one run; the cloud tier 409s unless a SHA-fresh
+localization exists (same rule as `reports_eligible_for_fix`).
 
 ## Storage and reliability patterns
 

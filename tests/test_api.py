@@ -99,6 +99,41 @@ def test_update_project():
     assert r.json()["name"] == "Updated"
 
 
+def test_project_fix_llm_fields_roundtrip():
+    """§5.3: fix_llm_* fields are settable, patchable, and nullable-to-clear."""
+    r = _create_project(fix_llm_provider="anthropic", fix_llm_model="claude-opus-4-8")
+    assert r.status_code == 201
+    body = r.json()
+    assert body["fix_llm_provider"] == "anthropic"
+    assert body["fix_llm_model"] == "claude-opus-4-8"
+
+    pid = body["id"]
+    r = client.patch(f"/api/v1/projects/{pid}", json={"fix_llm_model": "gpt-4o"})
+    assert r.json()["fix_llm_model"] == "gpt-4o"
+
+    # Explicit null clears the override back to the global fix settings.
+    r = client.patch(
+        f"/api/v1/projects/{pid}",
+        json={"fix_llm_provider": None, "fix_llm_model": None},
+    )
+    assert r.status_code == 200
+    assert r.json()["fix_llm_provider"] is None
+    assert r.json()["fix_llm_model"] is None
+
+
+def test_project_fix_llm_defaults_null():
+    body = _create_project().json()
+    assert body["fix_llm_provider"] is None
+    assert body["fix_llm_model"] is None
+
+
+def test_update_project_non_nullable_field_rejects_null():
+    pid = _create_project().json()["id"]
+    r = client.patch(f"/api/v1/projects/{pid}", json={"name": None})
+    assert r.status_code == 400
+    assert "name" in r.json()["detail"]
+
+
 def test_delete_project():
     pid = _create_project().json()["id"]
     r = client.delete(f"/api/v1/projects/{pid}")

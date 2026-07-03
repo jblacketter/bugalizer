@@ -1,7 +1,7 @@
 {
-  "state": "in-progress",
-  "ready_for": "reviewer",
-  "round": 1,
+  "state": "approved",
+  "ready_for": null,
+  "round": 2,
   "phase": "phase-4-fix-proposals",
   "type": "impl",
   "lead": "claude",

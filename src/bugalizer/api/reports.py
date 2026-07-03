@@ -2,22 +2,29 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from typing import Optional
 
 from bugalizer.auth import require_api_key
 from bugalizer.db import (
     analyses_for_report,
     fix_proposals_for_report,
+    latest_completed_localization,
     project_exists,
+    project_get,
     report_create,
     report_delete,
     report_failure_info,
     report_get,
     report_list,
+    report_update_fields,
     report_update_status,
 )
 from bugalizer.models import (
+    AnalysisModeUpdateRequest,
+    AnalysisTier,
+    AnalyzeRequest,
+    AnalyzeResponse,
     BugReportCreate,
     BugReportListResponse,
     BugReportResponse,
@@ -28,6 +35,7 @@ from bugalizer.models import (
     TERMINAL_STATUSES,
     validate_transition,
 )
+from bugalizer.pipeline.orchestrator import process_fix_proposal, run_local_analysis
 
 router = APIRouter(tags=["reports"])
 
@@ -66,6 +74,7 @@ def _row_to_response(row: dict, warnings: list[str] | None = None) -> BugReportR
         environment=row.get("environment"),
         labels=row.get("labels"),
         status=row["status"],
+        analysis_mode=row.get("analysis_mode") or "auto",
         resolution_reason=row.get("resolution_reason"),
         assigned_to=row.get("assigned_to"),
         created_at=row["created_at"],
@@ -103,6 +112,7 @@ def create_report(
         severity=body.severity.value,
         environment=body.environment,
         labels=body.labels,
+        analysis_mode=body.analysis_mode.value,
     )
 
     return _row_to_response(row, warnings)
@@ -178,6 +188,89 @@ def update_report_status(
         new_status=target.value,
         resolution_reason=body.resolution_reason,
     )
+
+
+@router.patch("/reports/{report_id}/analysis_mode")
+def update_analysis_mode(
+    report_id: str,
+    body: AnalysisModeUpdateRequest,
+    _key: str = Depends(require_api_key),
+) -> BugReportResponse:
+    """Change a report's analysis mode (auto | local_only | hold).
+
+    The mode gates *automatic* queue-worker dispatch: `hold` blocks all LLM
+    stages, `local_only` blocks the paid Stage 4. It takes effect on the next
+    worker poll; a stage already in flight is not interrupted.
+    """
+    row = report_get(report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Bug report not found")
+    updated = report_update_fields(report_id, analysis_mode=body.analysis_mode.value)
+    return _row_to_response(updated)
+
+
+@router.post("/reports/{report_id}/analyze", status_code=202)
+async def analyze_report(
+    report_id: str,
+    body: AnalyzeRequest,
+    background_tasks: BackgroundTasks,
+    _key: str = Depends(require_api_key),
+) -> AnalyzeResponse:
+    """Manually dispatch analysis for a report (the dashboard's two buttons).
+
+    - `{"tier": "local"}` — run/re-run triage + localization on the local
+      provider.
+    - `{"tier": "cloud"}` — run the Stage 4 fix proposal on the resolved fix
+      provider/model. Requires a completed, SHA-fresh localization (409
+      otherwise, matching `reports_eligible_for_fix`).
+
+    An explicit request overrides `analysis_mode` (`hold`/`local_only`) for
+    this one run — the mode gates automatic dispatch, not user actions. The
+    report must be in `triaged` status; work is dispatched in the background
+    (202) and progress is visible via report status / queue polling.
+    """
+    row = report_get(report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Bug report not found")
+
+    if row["status"] != "triaged":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Report is in status '{row['status']}'; manual analysis "
+                "requires 'triaged' (not already claimed by a pipeline stage)"
+            ),
+        )
+
+    if body.tier == AnalysisTier.LOCAL:
+        background_tasks.add_task(run_local_analysis, report_id)
+        detail = "Local triage + localization dispatched"
+    else:
+        # Cloud tier: enforce the same completed + SHA-fresh localization
+        # preconditions as reports_eligible_for_fix, but as a 409 the caller
+        # can act on. (propose_fix re-checks defensively after its claim.)
+        loc = latest_completed_localization(report_id)
+        if not loc:
+            raise HTTPException(
+                status_code=409,
+                detail="No completed localization; run local analysis first",
+            )
+        project = project_get(row["project_id"])
+        head_sha = project.get("head_sha") if project else None
+        result = loc.get("result")
+        loc_sha = result.get("repo_sha") if isinstance(result, dict) else None
+        if not head_sha or loc_sha != head_sha:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Localization is stale (repo_sha={loc_sha!r} != project "
+                    f"head_sha={head_sha!r}); re-run local analysis first"
+                ),
+            )
+        background_tasks.add_task(process_fix_proposal, report_id)
+        detail = "Cloud fix proposal dispatched"
+
+    return AnalyzeResponse(id=report_id, tier=body.tier.value, detail=detail)
 
 
 @router.get("/reports/{report_id}/localization")

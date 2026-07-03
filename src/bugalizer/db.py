@@ -74,6 +74,28 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.commit()
         logger.info("Migration: added projects.head_sha column")
 
+    # Phase 5 (§5.3): per-project Stage 4 fix model override. Nullable —
+    # NULL means "use the global fix_provider / default_fix_model". A separate
+    # namespace from llm_provider/llm_model, which scope local stages only.
+    if "fix_llm_provider" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN fix_llm_provider TEXT")
+        conn.commit()
+        logger.info("Migration: added projects.fix_llm_provider column")
+    if "fix_llm_model" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN fix_llm_model TEXT")
+        conn.commit()
+        logger.info("Migration: added projects.fix_llm_model column")
+
+    # Phase 5 (§5.3): bug_reports.analysis_mode — per-report tier selection
+    # (auto | local_only | hold). Existing rows get 'auto' (today's behavior).
+    br_columns = {row[1] for row in conn.execute("PRAGMA table_info(bug_reports)").fetchall()}
+    if "analysis_mode" not in br_columns:
+        conn.execute(
+            "ALTER TABLE bug_reports ADD COLUMN analysis_mode TEXT NOT NULL DEFAULT 'auto'"
+        )
+        conn.commit()
+        logger.info("Migration: added bug_reports.analysis_mode column")
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -97,6 +119,8 @@ CREATE TABLE IF NOT EXISTS projects (
     default_branch TEXT DEFAULT 'main',
     llm_provider TEXT DEFAULT 'ollama',
     llm_model TEXT DEFAULT 'qwen2.5-coder:7b',
+    fix_llm_provider TEXT,
+    fix_llm_model TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -117,6 +141,7 @@ CREATE TABLE IF NOT EXISTS bug_reports (
     attachments TEXT,
     labels TEXT,
     status TEXT NOT NULL DEFAULT 'submitted',
+    analysis_mode TEXT NOT NULL DEFAULT 'auto',
     resolution_reason TEXT,
     assigned_to TEXT,
     created_at TEXT NOT NULL,
@@ -189,14 +214,18 @@ def project_create(
     default_branch: str = "main",
     llm_provider: str = "ollama",
     llm_model: str = "qwen2.5-coder:7b",
+    fix_llm_provider: Optional[str] = None,
+    fix_llm_model: Optional[str] = None,
 ) -> dict[str, Any]:
     conn = _get_conn()
     row_id = _new_id()
     now = _now()
     conn.execute(
-        """INSERT INTO projects (id, name, repo_url, default_branch, llm_provider, llm_model, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (row_id, name, repo_url, default_branch, llm_provider, llm_model, now, now),
+        """INSERT INTO projects (id, name, repo_url, default_branch, llm_provider, llm_model,
+                                 fix_llm_provider, fix_llm_model, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (row_id, name, repo_url, default_branch, llm_provider, llm_model,
+         fix_llm_provider, fix_llm_model, now, now),
     )
     conn.commit()
     return dict(conn.execute("SELECT * FROM projects WHERE id = ?", (row_id,)).fetchone())
@@ -290,6 +319,7 @@ def report_create(
     severity: str = "medium",
     environment: Optional[str] = None,
     labels: Optional[list[str]] = None,
+    analysis_mode: str = "auto",
 ) -> dict[str, Any]:
     conn = _get_conn()
     row_id = _new_id()
@@ -299,13 +329,13 @@ def report_create(
            (id, project_id, title, description, reporter,
             steps_to_reproduce, expected_behavior, actual_behavior,
             url, feature_area, severity, environment, labels,
-            status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?)""",
+            status, analysis_mode, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?, ?)""",
         (
             row_id, project_id, title, description, reporter,
             _serialize_json(steps_to_reproduce), expected_behavior, actual_behavior,
             url, feature_area, severity, environment, _serialize_json(labels),
-            now, now,
+            analysis_mode, now, now,
         ),
     )
     conn.commit()
@@ -517,6 +547,8 @@ def triage_eligible_reports() -> list[dict[str, Any]]:
     - No triage analysis with status='completed' exists
     - Either no triage analysis at all, or most recent failed triage is
       past the retry delay and retry count < max retries
+    - analysis_mode is not 'hold' (§5.3: hold reports never auto-dispatch
+      to any LLM stage; validation/dedupe already ran in Stage 1)
     """
     conn = _get_conn()
     max_retries = settings.max_triage_retries
@@ -527,6 +559,7 @@ def triage_eligible_reports() -> list[dict[str, Any]]:
         _report_row_to_dict(r) for r in conn.execute(
             """SELECT * FROM bug_reports
                WHERE status = 'triaged'
+               AND COALESCE(analysis_mode, 'auto') != 'hold'
                AND (resolution_reason IS NULL OR resolution_reason != 'deleted')
                ORDER BY created_at ASC"""
         ).fetchall()
@@ -651,6 +684,8 @@ def localization_eligible_reports() -> list[dict[str, Any]]:
     - Not blocked by the localization retry gate (max_localize_retries /
       retry_delay_seconds / a permanent failure), derived from failed
       localization analysis rows since the last successful localization.
+    - analysis_mode is not 'hold' (§5.3). `local_only` reports ARE eligible —
+      localization is a local stage; the mode only stops Stage 4.
     """
     conn = _get_conn()
     now = datetime.now(timezone.utc)
@@ -661,6 +696,7 @@ def localization_eligible_reports() -> list[dict[str, Any]]:
            FROM bug_reports br
            JOIN projects p ON br.project_id = p.id
            WHERE br.status = 'triaged'
+           AND COALESCE(br.analysis_mode, 'auto') != 'hold'
            AND p.repo_path IS NOT NULL
            AND (br.resolution_reason IS NULL OR br.resolution_reason != 'deleted')
            AND EXISTS (
@@ -795,6 +831,10 @@ def reports_eligible_for_fix() -> list[dict[str, Any]]:
       a permanent failure), derived from failed `fix` analysis rows recorded
       since the current localization. Each retry is a paid cloud call, so the
       cap is deliberately low and permanent failures never retry.
+    - analysis_mode is 'auto' (§5.3): `local_only` and `hold` reports are
+      never auto-dispatched to the paid cloud stage. An explicit
+      `POST /reports/{id}/analyze {"tier": "cloud"}` bypasses this gate —
+      the mode governs *automatic* dispatch, not manual requests.
     - Not soft-deleted.
     """
     conn = _get_conn()
@@ -804,6 +844,7 @@ def reports_eligible_for_fix() -> list[dict[str, Any]]:
            FROM bug_reports br
            JOIN projects p ON br.project_id = p.id
            WHERE br.status = 'triaged'
+           AND COALESCE(br.analysis_mode, 'auto') = 'auto'
            AND (br.resolution_reason IS NULL OR br.resolution_reason != 'deleted')
            AND EXISTS (
                SELECT 1 FROM analyses a

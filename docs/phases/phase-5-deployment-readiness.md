@@ -115,13 +115,16 @@ crypto remains in the codebase; decision logged.
 
 **Analysis mode.**
 
-- [ ] Add `analysis_mode` to bug reports: `auto` (**default**, preserves today's behavior: local
+- [x] Add `analysis_mode` to bug reports: `auto` (**default**, preserves today's behavior: local
       triage + localize, cloud fix when eligible), `local_only` (never call the cloud; stop after
       localization), `hold` (validate + dedupe only; wait for a human to pick a tier).
-- [ ] Eligibility queries in `db.py` respect `analysis_mode`: `hold` reports never auto-dispatch to
+      — Column migrated in `_migrate()` (existing rows → `auto`); settable at creation and via
+      `PATCH /reports/{id}/analysis_mode`; surfaced in report responses.
+- [x] Eligibility queries in `db.py` respect `analysis_mode`: `hold` reports never auto-dispatch to
       any stage; `local_only` reports are never eligible for Stage 4 (`reports_eligible_for_fix`
-      excludes them). `auto` is unchanged.
-- [ ] Add `POST /api/v1/reports/{id}/analyze` with body `{"tier": "local" | "cloud"}` (the
+      excludes them). `auto` is unchanged. (Stage 1 validation/dedupe still runs for `hold` — it is
+      free and the mode's own definition includes it.)
+- [x] Add `POST /api/v1/reports/{id}/analyze` with body `{"tier": "local" | "cloud"}` (the
       dashboard's two buttons):
       - `local` → run/re-run triage + localization on the local provider.
       - `cloud` → run the Stage 4 fix proposal. Requires a completed, SHA-fresh localization (409
@@ -136,22 +139,30 @@ The Project model has a *single* `llm_provider`/`llm_model` pair defaulting to
 must go to the cloud fix provider (`fix_provider` / `default_fix_model`, default
 `anthropic` / `claude-sonnet-4-6`) — the two are kept in **separate namespaces**:
 
-- [ ] **Existing `llm_provider` / `llm_model` scope local stages ONLY** (triage + localization).
+- [x] **Existing `llm_provider` / `llm_model` scope local stages ONLY** (triage + localization).
       They are never consulted by Stage 4. Wiring them in means: triage/localize resolve their
       model as `report/project override → global `default_triage_model` / `default_localize_model``.
       A project left at the `ollama` default therefore keeps exactly today's local behavior.
-- [ ] **Stage 4 gets its own optional per-project override fields**, added in this slice:
+- [x] **Stage 4 gets its own optional per-project override fields**, added in this slice:
       `fix_llm_provider` / `fix_llm_model` (nullable; `NULL` = use global `fix_provider` /
       `default_fix_model`). Stage 4 resolves as `report fix override → project fix override →
       global fix settings`. The default project (with these `NULL`) keeps the Phase 4 cloud fix
       path untouched.
-- [ ] **Precedence, stated once:** for every stage the order is
+- [x] **Precedence, stated once:** for every stage the order is
       `per-report override → per-project override → global setting`. Local stages read the
       `llm_*` fields; Stage 4 reads the `fix_llm_*` fields. There is no path by which a project's
       `llm_provider=ollama` reaches Stage 4.
-- [ ] `analysis_mode=local_only` stops before Stage 4 regardless of any `fix_llm_*` value (mode
+- [x] `analysis_mode=local_only` stops before Stage 4 regardless of any `fix_llm_*` value (mode
       gate wins over provider config). `POST .../analyze {"tier":"cloud"}` uses the resolved Stage 4
       fix provider/model (per the precedence above), not the local `llm_*` fields.
+
+**Implementation note (Cycle 2):** resolution lives in `llm/client.py::resolve_local_llm` /
+`resolve_fix_llm`. The *per-report* slot in the precedence chain has no carrier field in this
+slice — no per-report model override was specced or added — so the implemented order is
+`per-project override → global setting`; the stage functions (`triage_report`,
+`localize_report`) keep explicit `model=`/`provider=` parameters as the hook if a per-report
+field lands later. `fix_llm_*` falls back per-field (overriding only the model keeps the
+global `anthropic` provider).
 
 **Acceptance:** a bug can sit in the queue untouched (`hold`), be analyzed locally on demand, and be
 escalated to cloud AI on demand; `auto` preserves today's behavior; **an existing project with the

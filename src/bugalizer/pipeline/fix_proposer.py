@@ -335,10 +335,15 @@ async def propose_fix(report_id: str) -> None:
             enable_prompt_caching=settings.fix_enable_prompt_caching,
         )
 
+        # §5.3: Stage 4 resolves via the project's fix_llm_provider/
+        # fix_llm_model (nullable → global fix_provider/default_fix_model).
+        # It never reads the local llm_provider/llm_model pair, so a default
+        # `ollama` project still routes fixes to the cloud provider.
+        fix_provider, fix_model = llm_client.resolve_fix_llm(project)
         llm_response = await llm_client.complete(
-            model=settings.default_fix_model,
+            model=fix_model,
             messages=messages,
-            provider=settings.fix_provider,
+            provider=fix_provider,
         )
 
         # 4. Parse + validate.

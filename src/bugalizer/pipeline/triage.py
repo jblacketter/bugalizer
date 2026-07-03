@@ -11,11 +11,12 @@ from bugalizer.db import (
     analysis_create,
     analysis_update,
     db_write_lock,
+    project_get,
     report_update_fields,
     report_update_status,
     token_usage_create,
 )
-from bugalizer.llm.client import complete
+from bugalizer.llm.client import complete, resolve_local_llm
 from bugalizer.llm.prompts import format_triage_prompt
 
 logger = logging.getLogger(__name__)
@@ -32,14 +33,29 @@ def _parse_triage_response(content: str) -> dict[str, Any]:
     return json.loads(text)
 
 
-async def triage_report(report: dict[str, Any], model: str | None = None) -> dict[str, Any]:
+async def triage_report(
+    report: dict[str, Any],
+    model: str | None = None,
+    provider: str | None = None,
+) -> dict[str, Any]:
     """Run Stage 2 triage on a report.
 
     Calls the LLM (lock NOT held during network I/O), then writes results
     to DB under db_write_lock.
 
+    Provider/model default to the project's local `llm_provider`/`llm_model`
+    (falling back to the global triage default) — see
+    `llm.client.resolve_local_llm`. Explicit arguments win.
+
     Returns the analysis result dict.
     """
+    if model is None or provider is None:
+        resolved_provider, resolved_model = resolve_local_llm(
+            project_get(report["project_id"]), stage="triage"
+        )
+        provider = provider or resolved_provider
+        model = model or resolved_model
+
     now = datetime.now(timezone.utc).isoformat()
 
     # Create a pending analysis record (DB write under lock)
@@ -54,7 +70,7 @@ async def triage_report(report: dict[str, Any], model: str | None = None) -> dic
     try:
         # LLM call — NO lock held during network I/O
         messages = format_triage_prompt(report)
-        llm_response = await complete(model=model, messages=messages)
+        llm_response = await complete(model=model, messages=messages, provider=provider)
 
         triage_result = _parse_triage_response(llm_response.content)
         completed_at = datetime.now(timezone.utc).isoformat()

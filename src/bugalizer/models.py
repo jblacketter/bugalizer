@@ -114,6 +114,27 @@ class Severity(str, Enum):
 
 
 # ---------------------------------------------------------------------------
+# Analysis mode (Phase 5 §5.3 — per-report analysis tier)
+# ---------------------------------------------------------------------------
+
+class AnalysisMode(str, Enum):
+    """Per-report analysis-tier selection.
+
+    Gates *automatic* queue-worker dispatch only; an explicit
+    `POST /reports/{id}/analyze` always overrides the mode for that request.
+    """
+    AUTO = "auto"              # local triage+localize, cloud fix when eligible
+    LOCAL_ONLY = "local_only"  # never auto-call the cloud; stop after localization
+    HOLD = "hold"              # validate + dedupe only; human picks a tier later
+
+
+class AnalysisTier(str, Enum):
+    """Tier choice for a manual `POST /reports/{id}/analyze` request."""
+    LOCAL = "local"   # run/re-run triage + localization on the local provider
+    CLOUD = "cloud"   # run the Stage 4 fix proposal on the cloud fix provider
+
+
+# ---------------------------------------------------------------------------
 # Bug report models
 # ---------------------------------------------------------------------------
 
@@ -137,6 +158,7 @@ class BugReportCreate(BaseModel):
     severity: Severity = Severity.MEDIUM
     environment: Optional[str] = None
     labels: Optional[list[str]] = None
+    analysis_mode: AnalysisMode = AnalysisMode.AUTO
 
 
 class BugReportResponse(BaseModel):
@@ -154,6 +176,7 @@ class BugReportResponse(BaseModel):
     environment: Optional[str] = None
     labels: Optional[list[str]] = None
     status: str
+    analysis_mode: str = "auto"
     resolution_reason: Optional[str] = None
     assigned_to: Optional[str] = None
     created_at: str
@@ -182,6 +205,24 @@ class StatusUpdateResponse(BaseModel):
     resolution_reason: Optional[str] = None
 
 
+class AnalysisModeUpdateRequest(BaseModel):
+    """Request body for changing a report's analysis mode."""
+    analysis_mode: AnalysisMode
+
+
+class AnalyzeRequest(BaseModel):
+    """Request body for POST /reports/{id}/analyze — the dashboard's two buttons."""
+    tier: AnalysisTier
+
+
+class AnalyzeResponse(BaseModel):
+    """202 response for a dispatched manual analysis."""
+    id: str
+    tier: str
+    dispatched: bool = True
+    detail: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Project models
 # ---------------------------------------------------------------------------
@@ -190,8 +231,14 @@ class ProjectCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     repo_url: str = Field(..., min_length=1, max_length=1000)
     default_branch: str = "main"
+    # Local stages ONLY (triage + localization). Never consulted by Stage 4.
     llm_provider: str = "ollama"
     llm_model: str = "qwen2.5-coder:7b"
+    # Stage 4 fix-proposal override (§5.3). NULL = use the global
+    # fix_provider / default_fix_model. Separate namespace from llm_* so a
+    # default `ollama` project never routes cloud fixes to Ollama.
+    fix_llm_provider: Optional[str] = None
+    fix_llm_model: Optional[str] = None
 
 
 class ProjectUpdate(BaseModel):
@@ -200,6 +247,9 @@ class ProjectUpdate(BaseModel):
     default_branch: Optional[str] = None
     llm_provider: Optional[str] = None
     llm_model: Optional[str] = None
+    # Explicit null clears the override (falls back to global fix settings).
+    fix_llm_provider: Optional[str] = None
+    fix_llm_model: Optional[str] = None
 
 
 class ProjectResponse(BaseModel):
@@ -210,6 +260,8 @@ class ProjectResponse(BaseModel):
     default_branch: str
     llm_provider: str
     llm_model: str
+    fix_llm_provider: Optional[str] = None
+    fix_llm_model: Optional[str] = None
     created_at: str
     updated_at: str
 

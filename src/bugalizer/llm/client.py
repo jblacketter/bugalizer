@@ -26,6 +26,59 @@ class LLMResponse:
     provider: str
 
 
+# ---------------------------------------------------------------------------
+# Provider/model resolution (Phase 5 §5.3)
+#
+# Precedence for every stage: per-project override → global setting.
+# LOCAL stages (triage, localization) read the project's `llm_provider` /
+# `llm_model`; Stage 4 (fix proposals) reads `fix_llm_provider` /
+# `fix_llm_model` and NEVER the local pair — there is no path by which a
+# project's `llm_provider=ollama` reaches Stage 4.
+# ---------------------------------------------------------------------------
+
+def resolve_local_llm(
+    project: Optional[dict[str, Any]], stage: str
+) -> tuple[str, str]:
+    """Resolve (provider, model) for a local pipeline stage.
+
+    `stage` is "triage" or "localize" — it selects which global default
+    model applies when the project carries no value. Projects default to
+    `ollama` / `qwen2.5-coder:7b` (same as the globals), so a default
+    project keeps exactly the pre-§5.3 local behavior.
+    """
+    default_model = (
+        settings.default_triage_model
+        if stage == "triage"
+        else settings.default_localize_model
+    )
+    provider = "ollama"
+    model = default_model
+    if project:
+        if project.get("llm_provider"):
+            provider = project["llm_provider"]
+        if project.get("llm_model"):
+            model = project["llm_model"]
+    return provider, model
+
+
+def resolve_fix_llm(project: Optional[dict[str, Any]]) -> tuple[str, str]:
+    """Resolve (provider, model) for Stage 4 fix proposals.
+
+    Per-field fallback: `fix_llm_provider` → global `fix_provider`;
+    `fix_llm_model` → global `default_fix_model`. Setting only the model
+    keeps the global provider (e.g. pin a different Claude model while
+    staying on `anthropic`).
+    """
+    provider = settings.fix_provider
+    model = settings.default_fix_model
+    if project:
+        if project.get("fix_llm_provider"):
+            provider = project["fix_llm_provider"]
+        if project.get("fix_llm_model"):
+            model = project["fix_llm_model"]
+    return provider, model
+
+
 async def complete(
     model: Optional[str] = None,
     messages: list[dict[str, Any]] | None = None,

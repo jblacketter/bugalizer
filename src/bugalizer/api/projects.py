@@ -35,6 +35,8 @@ def _row_to_response(row: dict) -> ProjectResponse:
         default_branch=row.get("default_branch", "main"),
         llm_provider=row.get("llm_provider", "ollama"),
         llm_model=row.get("llm_model", "qwen2.5-coder:7b"),
+        fix_llm_provider=row.get("fix_llm_provider"),
+        fix_llm_model=row.get("fix_llm_model"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -52,6 +54,8 @@ def create_project(
         default_branch=body.default_branch,
         llm_provider=body.llm_provider,
         llm_model=body.llm_model,
+        fix_llm_provider=body.fix_llm_provider,
+        fix_llm_model=body.fix_llm_model,
     )
     return _row_to_response(row)
 
@@ -86,10 +90,21 @@ def update_project(
     body: ProjectUpdate,
     _key: str = Depends(require_api_key),
 ) -> ProjectResponse:
-    """Update project settings."""
-    updates = body.model_dump(exclude_none=True)
+    """Update project settings.
+
+    `fix_llm_provider`/`fix_llm_model` are nullable: pass an explicit JSON
+    `null` to clear the override (Stage 4 falls back to the global fix
+    settings). Other fields cannot be nulled.
+    """
+    updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
+    nullable = {"fix_llm_provider", "fix_llm_model"}
+    for field, value in updates.items():
+        if value is None and field not in nullable:
+            raise HTTPException(
+                status_code=400, detail=f"Field '{field}' cannot be null"
+            )
     row = project_update(project_id, **updates)
     if not row:
         raise HTTPException(status_code=404, detail="Project not found")

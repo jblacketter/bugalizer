@@ -166,12 +166,19 @@ async def process_localization(report_id: str) -> None:
                 triage_summary = t["result"].get("summary")
                 break
 
+        # Resolve local provider/model from the project (§5.3: llm_provider/
+        # llm_model scope local stages only; Stage 4 has its own namespace).
+        from bugalizer.llm.client import resolve_local_llm
+        provider, model = resolve_local_llm(project, stage="localize")
+
         # Run localization (LLM calls are async, file reads use to_thread internally)
         await localize_report(
             report,
             repo_map.text,
             sha,
             repo_path,
+            model=model,
+            provider=provider,
             triage_summary=triage_summary,
         )
 
@@ -185,6 +192,20 @@ async def process_localization(report_id: str) -> None:
         logger.error("Localization failed for report %s: %s", report_id, e)
         async with db_write_lock:
             report_update_status(report_id, "triaged")
+
+
+async def run_local_analysis(report_id: str) -> None:
+    """Manual Stage 2 + Stage 3 dispatch (POST /reports/{id}/analyze, tier=local).
+
+    Runs triage then localization sequentially. Each stage does its own
+    atomic claim, so a report already claimed by the queue worker is skipped
+    safely. Deliberately does NOT consult `analysis_mode` — an explicit
+    request overrides `hold`/`local_only` for this one run (§5.3).
+    """
+    await process_triaged(report_id)
+    # If triage routed to clarification_needed, the localization claim on
+    # 'triaged' fails and this is a silent no-op — correct behavior.
+    await process_localization(report_id)
 
 
 async def process_fix_proposal(report_id: str) -> None:
