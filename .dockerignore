@@ -1,0 +1,19 @@
+# Keep the build context minimal — only pyproject/uv.lock/src are copied.
+.git
+.venv
+.env
+*.db
+*.db-wal
+*.db-shm
+data/
+repos/
+cache/
+tests/
+docs/
+.tagteam/
+.claude/
+.pytest_cache/
+__pycache__/
+handoff-state.json
+handoff-diagnostics.jsonl
+.handoff-session.json

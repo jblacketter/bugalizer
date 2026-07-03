@@ -61,7 +61,7 @@ uv sync --dev
 
 ```bash
 uv run pytest
-# 139 tests, all should pass (no Ollama required — LLM calls are mocked)
+# 191 tests, all should pass (no Ollama required — LLM calls are mocked)
 ```
 
 ### Start the Server
@@ -74,7 +74,19 @@ ollama pull qwen2.5-coder:7b
 BUGALIZER_DB_PATH=bugalizer.db uv run uvicorn bugalizer.main:app --port 8090
 ```
 
-API docs available at [http://localhost:8090/docs](http://localhost:8090/docs).
+API docs available at [http://localhost:8090/docs](http://localhost:8090/docs);
+the queue dashboard is served at [http://localhost:8090/](http://localhost:8090/).
+
+### Deploy
+
+For always-on LAN hosting (Docker Compose or a Windows service via NSSM), see
+[`docs/deploy-windows.md`](docs/deploy-windows.md) and the end-to-end
+[`docs/smoke-test.md`](docs/smoke-test.md). Short version:
+
+```bash
+cp .env.example .env   # set BUGALIZER_API_KEYS (+ Anthropic key for fixes)
+docker compose up -d --build
+```
 
 ### Submit a Bug Report
 

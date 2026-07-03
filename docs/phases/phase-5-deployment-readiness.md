@@ -203,18 +203,28 @@ states without refreshing the API docs; both analyze buttons work end-to-end.
 Target: Ollama runs **natively on Windows** (GPU access), Bugalizer runs as a supervised service
 pointing at it via `BUGALIZER_OLLAMA_HOST`.
 
-- [ ] `Dockerfile` + `docker-compose.yml` (app only; volume-mount `bugalizer.db`, `repos/`,
+- [x] `Dockerfile` + `docker-compose.yml` (app only; volume-mount `bugalizer.db`, `repos/`,
       `cache/`; `restart: unless-stopped`; healthcheck hits the liveness endpoint;
       `BUGALIZER_OLLAMA_HOST=http://host.docker.internal:11434`).
-- [ ] Fallback for no-Docker: NSSM or Task Scheduler service recipe running
-      `uv run uvicorn bugalizer.main:app`.
-- [ ] `.env.example` documenting every `BUGALIZER_*` var with sane LAN defaults, plus the
-      `QA_LLM_*` fallback layer.
-- [ ] `docs/deploy-windows.md`: install steps, Ollama model pulls (`qwen2.5-coder:7b`), key
+      — Non-root user; all mutable state consolidated under a single `/data` mount
+      (`./data` on the host = one dir to back up); healthcheck uses the venv python
+      (no curl in the image); `.dockerignore` keeps the context to pyproject/lock/src.
+- [x] Fallback for no-Docker: NSSM or Task Scheduler service recipe running
+      `uv run uvicorn bugalizer.main:app` — in `docs/deploy-windows.md` §4. Enabler:
+      `Settings` now actually reads `.env` from the working directory (the config docstring
+      claimed it but `model_config` never wired `env_file`); real env vars still win, and
+      `tests/conftest.py` pins the suite's env so a developer's `.env` can't affect tests.
+- [x] `.env.example` documenting every `BUGALIZER_*` var with sane LAN defaults, plus the
+      `QA_LLM_*` fallback layer. (Existed since 5.0; verified complete.)
+- [x] `docs/deploy-windows.md`: install steps, Ollama model pulls (`qwen2.5-coder:7b`), key
       generation, backup note (SQLite file copy while stopped, or `sqlite3 .backup`), how other
-      LAN apps submit bugs (curl example with `X-API-Key`).
-- [ ] Smoke-test doc: submit a bug from another machine on the LAN, watch it on the dashboard,
-      run local analysis, escalate one to cloud.
+      LAN apps submit bugs (curl example with `X-API-Key`). Also: firewall rule, Docker Desktop
+      autostart note (what makes `restart: unless-stopped` survive reboot), update procedure.
+- [x] Smoke-test doc (`docs/smoke-test.md`): submit a bug from another machine on the LAN,
+      watch it on the dashboard, run local analysis (`hold` + Analyze-local), escalate one to
+      cloud (incl. the no-localization 409 guard), reboot-survival check; results to be
+      recorded in `docs/decision_log.md`. **Execution on the Windows box is pending** — the
+      docs/packaging are this cycle; the hardware run closes the phase's definition of done.
 
 **Acceptance:** service survives a reboot, is reachable from other LAN machines, and the smoke
 test passes end-to-end against real Ollama.

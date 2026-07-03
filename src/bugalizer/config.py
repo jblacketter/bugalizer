@@ -71,7 +71,13 @@ class Settings(BaseSettings):
     fix_max_file_bytes: int = 524_288       # 512 KiB per-file cap
     fix_enable_prompt_caching: bool = True
 
-    model_config = {"env_prefix": "BUGALIZER_"}
+    # `.env` in the working directory is read on startup (§5.5 native-service
+    # deploys); real environment variables always take precedence over it.
+    model_config = {
+        "env_prefix": "BUGALIZER_",
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+    }
 
     @model_validator(mode="after")
     def _apply_generic_llm_fallbacks(self) -> "Settings":

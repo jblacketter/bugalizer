@@ -1,0 +1,28 @@
+# Bugalizer LAN deployment (Phase 5 §5.5) — app container only.
+# Ollama runs natively on the host (GPU access); the container reaches it
+# through host.docker.internal. See docs/deploy-windows.md.
+services:
+  bugalizer:
+    build: .
+    container_name: bugalizer
+    ports:
+      - "8090:8090"
+    env_file:
+      # Copy .env.example -> .env and set BUGALIZER_API_KEYS (+ the Anthropic
+      # key for Stage 4). Values here are optional; the environment: block
+      # below still applies without it.
+      - path: .env
+        required: false
+    environment:
+      # Override the .env localhost default: inside the container, the host's
+      # native Ollama is reachable via the host gateway alias.
+      BUGALIZER_OLLAMA_HOST: http://host.docker.internal:11434
+    extra_hosts:
+      # No-op on Docker Desktop (Windows/macOS provide the alias natively);
+      # required for the alias to exist on plain Linux engines.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # All mutable state (SQLite DB, cloned repos, repo-map cache) lives in
+      # ./data on the host — one directory to back up.
+      - ./data:/data
+    restart: unless-stopped

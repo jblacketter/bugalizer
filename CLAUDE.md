@@ -65,8 +65,8 @@ tests/
 - **Phase 5 (Deployment Readiness + Dashboard): IN PROGRESS** — see `docs/phases/phase-5-deployment-readiness.md`
   - Cycle 1 (5.1 retry gates + 5.2 security defaults): COMPLETE (codex-approved)
   - Cycle 2 (5.3 per-report `analysis_mode`, `POST /reports/{id}/analyze`, per-project `fix_llm_*` provider split): COMPLETE (codex-approved)
-  - Cycle 3 (5.4 queue dashboard at `/`, reports list pagination, `GET /reports/{id}/analyses`): IMPLEMENTED — awaiting review
-  - Remaining: Cycle 4 (5.5 deployment packaging)
+  - Cycle 3 (5.4 queue dashboard at `/`, reports list pagination, `GET /reports/{id}/analyses`): COMPLETE (codex-approved)
+  - Cycle 4 (5.5 packaging: Dockerfile/compose, NSSM recipe, `docs/deploy-windows.md`, `docs/smoke-test.md`, `.env` file support in Settings): IMPLEMENTED — awaiting review; real-hardware smoke test on the Windows box still pending
 - Phase 6 (Integrations): NOT STARTED
 
 ## Handoff Workflow
