@@ -1,15 +1,15 @@
 # Phase 5 — Deployment Readiness & Queue Dashboard
 
-**Status:** DRAFT — pending tagteam review (lead: claude, reviewer: codex)
-**Drafted:** 2026-07-02
+**Status:** PLAN REVIEW — submitted to tagteam (lead: claude, reviewer: codex)
+**Drafted:** 2026-07-02 · **Updated:** 2026-07-03 (Phase 4 impl approved; 5.0 housekeeping largely done)
 **Goal:** Make Bugalizer safe to host permanently on the LAN (Windows / RTX 4070 Super) so other
 apps can submit bugs to it, the user can watch bugs stack up in a queue dashboard, and each bug
 can be analyzed on (a) the local LLM or (b) cloud AI.
 
 ## Why this phase
 
-A full re-evaluation (2026-07-02) found Phases 1–4 implemented and all 139 tests passing, but four
-blockers for always-on hosting:
+A full re-evaluation (2026-07-02) found Phases 1–4 implemented and all tests passing (142 as of
+2026-07-03, after the Phase 4 impl review), but four blockers for always-on hosting:
 
 1. **Unbounded paid retries.** Stage 3 (localization) and Stage 4 (fix proposal) failures reset the
    report to `triaged` with no failure record, no retry cap, and no backoff. A persistently failing
@@ -26,11 +26,15 @@ blockers for always-on hosting:
    default), CORS `allow_origins=["*"]`, `/health` is static (doesn't check DB or Ollama), and
    there is no Dockerfile / service definition / deploy doc.
 
-Also outstanding housekeeping: the uv-migration working tree is uncommitted; README still calls
-Phase 4 "planned"; `docs/phases/architecture.md` and `docs/llm-tiering.md` are referenced by
-CLAUDE.md / `config.py` / `llm/client.py` but do not exist; the Phase 4 tagteam review was never
-actually queued (no artifact in `docs/handoffs/`); Fernet key-encryption is an unimplemented stub
-(`settings.secret_key`, `projects.api_key_encrypted` column, no `cryptography` dependency).
+Housekeeping status (2026-07-03): the uv migration is committed, the Phase 4 tagteam review has
+been queued **and approved** (round 2, commit `498fef1`), `docs/phases/architecture.md` now exists,
+the README/decision-log/`.env.example` de-staling landed (commit `3f78ce3`), and Stage 4's
+unbounded-retry concern (blocker #1) was partially de-risked — Stage 4 no longer runs on stale
+localization, though the retry *cap/backoff* itself is still open and remains 5.1's job. Still
+outstanding: `docs/llm-tiering.md` is referenced by `config.py` / `llm/client.py` but does not
+exist (fold into `architecture.md` or repoint); Fernet key-encryption remains an unimplemented stub
+(`settings.secret_key`, `projects.api_key_encrypted` column, no `cryptography` dependency) — 5.2
+decides its fate.
 
 ## Scope
 
@@ -43,18 +47,18 @@ single process is fine for one LAN host), auth beyond static API keys.
 
 ## 5.0 Housekeeping (prerequisite, no behavior change)
 
-- [ ] Commit the uv migration currently sitting in the working tree (`pyproject.toml`,
-      `uv.lock`, `.python-version`, deleted `requirements.txt`, CLAUDE.md/README wording).
-- [ ] Fix stale README: Phase 4 is implemented and wired into the worker (`queue/worker.py:71-77`),
-      not "planned". Update the two pipeline diagrams.
-- [ ] Resolve dangling doc references: either write `docs/phases/architecture.md` and
-      `docs/llm-tiering.md`, or repoint the references in CLAUDE.md, `config.py:72`, and
-      `llm/client.py`. Recommendation: write a short `architecture.md` (the design is stable now)
-      and fold LLM-tiering into it.
-- [ ] Queue the overdue Phase 4 review as the first tagteam handoff of this cycle (CLAUDE.md says
-      "awaiting review" but `docs/handoffs/` is empty — nothing exists for codex to pick up).
-- [ ] Fill in `docs/decision_log.md` (currently a blank template) with the decisions made in this
-      phase, starting with 5.2's secrets decision.
+- [x] Commit the uv migration (`pyproject.toml`, `uv.lock`, `.python-version`, deleted
+      `requirements.txt`, CLAUDE.md/README wording). — done, commit `05b74b0`.
+- [x] Fix stale README: Phase 4 is implemented and wired into the worker (`queue/worker.py:71-77`),
+      not "planned". — done, commit `3f78ce3`.
+- [~] Resolve dangling doc references: `docs/phases/architecture.md` now exists (commit `62ba64d`);
+      `docs/llm-tiering.md` is still referenced by `config.py` / `llm/client.py` and must be either
+      written or folded into `architecture.md` and repointed. Recommendation: fold into
+      `architecture.md`.
+- [x] Queue the overdue Phase 4 review as the first tagteam handoff. — done; approved round 2,
+      commit `498fef1`.
+- [~] Fill in `docs/decision_log.md` with this phase's decisions, starting with 5.2's secrets
+      decision. — template seeded (commit `62ba64d`); 5.2's Fernet decision still to be recorded.
 
 ## 5.1 Worker reliability (blocker — do before any always-on deployment)
 
@@ -169,15 +173,17 @@ test passes end-to-end against real Ollama.
 
 Each numbered slice is one tagteam handoff cycle (claude implements → codex reviews):
 
-1. **Cycle 0:** overdue Phase 4 review + 5.0 housekeeping commit (small, unblocks everything).
-2. **Cycle 1:** 5.1 worker reliability + 5.2 security (the two blockers; ship together — they're
-   both small, code-adjacent changes).
+1. **Cycle 0 (DONE):** overdue Phase 4 review (approved, `498fef1`) + 5.0 housekeeping commits
+   (`05b74b0`, `3f78ce3`, `62ba64d`). Residual: `docs/llm-tiering.md` repoint + decision-log fill,
+   both folded into Cycle 1's 5.2 work.
+2. **Cycle 1 (NEXT):** 5.1 worker reliability + 5.2 security (the two blockers; ship together —
+   they're both small, code-adjacent changes).
 3. **Cycle 2:** 5.3 analysis-tier selection (API + pipeline gating; dashboard-independent).
 4. **Cycle 3:** 5.4 dashboard.
 5. **Cycle 4:** 5.5 deployment packaging + real-hardware smoke test on the Windows box.
 
 Definition of done for the phase: all acceptance criteria above; full test suite green
-(139 existing + new coverage for retries, analysis modes, and the reports list endpoint);
+(142 existing + new coverage for retries, analysis modes, and the reports list endpoint);
 service running on the LAN box past a reboot; smoke test recorded in `docs/decision_log.md`.
 
 ## Open questions for review
