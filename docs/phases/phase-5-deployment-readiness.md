@@ -86,6 +86,11 @@ Mirror the triage retry pattern for Stages 3 and 4:
 - [ ] Optional hardening: skip dispatching Ollama stages for one poll cycle after an
       Ollama-connectivity failure (simple cooldown). **Deferred** — not needed for the blocker;
       revisit if flapping Ollama causes churn.
+- [ ] Follow-up (codex Cycle-1 review, non-blocking): a report stuck in a precondition *defer*
+      loop (e.g. localization yields no candidate files every pass) re-dispatches every poll. It
+      spends no cloud calls (defers never reach the LLM) so it is outside the blocker acceptance,
+      but it is wasted local work — give repeated defers a light cooldown or a bounded defer count.
+      Slotted for a later Phase 5 cleanup cycle.
 
 **Acceptance:** a report whose localization or fix stage always fails ends in a visible failed
 state after N attempts, with the error recorded; no unbounded Anthropic spend is possible; tests
