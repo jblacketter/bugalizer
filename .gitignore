@@ -36,6 +36,9 @@ repos/
 .env
 .env.local
 
+# Tagteam runtime session state (recreated per session)
+.handoff-session.json
+
 # Pytest
 .pytest_cache/
 htmlcov/
