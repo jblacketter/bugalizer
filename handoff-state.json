@@ -9,22 +9,6 @@
   "run_mode": "single-phase",
   "history": [
     {
-      "turn": "lead",
-      "status": "ready",
-      "timestamp": "2026-07-02T23:23:17.094371+00:00",
-      "phase": "phase-4-fix-proposals",
-      "round": 1,
-      "updated_by": "codex"
-    },
-    {
-      "turn": "reviewer",
-      "status": "ready",
-      "timestamp": "2026-07-03T00:55:01.632179+00:00",
-      "phase": "phase-4-fix-proposals",
-      "round": 2,
-      "updated_by": "claude"
-    },
-    {
       "turn": null,
       "status": "done",
       "timestamp": "2026-07-03T00:56:09.816035+00:00",
@@ -167,8 +151,24 @@
       "phase": "phase-5b-dashboard-ux",
       "round": 1,
       "updated_by": "claude"
+    },
+    {
+      "turn": null,
+      "status": "done",
+      "timestamp": "2026-07-03T12:12:13.889233+00:00",
+      "phase": "phase-5b-dashboard-ux",
+      "round": 1,
+      "updated_by": "codex"
+    },
+    {
+      "turn": "reviewer",
+      "status": "ready",
+      "timestamp": "2026-07-03T12:22:33.338998+00:00",
+      "phase": "phase-5b-dashboard-ux",
+      "round": 1,
+      "updated_by": "claude"
     }
   ],
-  "seq": 22,
-  "updated_at": "2026-07-03T12:12:13.889233+00:00"
+  "seq": 24,
+  "updated_at": "2026-07-03T12:23:39.339964+00:00"
 }

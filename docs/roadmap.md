@@ -52,7 +52,7 @@ tree-sitter / uv
   - Docker/service packaging + Windows LAN deploy guide — live at `https://bugalizer.lan/`
 
 ### Phase 5b: Dashboard UX & Tier Clarity
-- **Status:** Plan review (`docs/phases/phase-5b-dashboard-ux.md`)
+- **Status:** Complete — both impl cycles codex-approved 2026-07-03 (`docs/phases/phase-5b-dashboard-ux.md`); Windows redeploy pending
 - **Description:** Make the dashboard a genuinely good operator UI: unmistakable local-vs-cloud
   tier identity (free vs paid), visible "already scanned" state, readable results, and no
   curl-only workflows. Fake bug reports as working material.

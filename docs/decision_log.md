@@ -6,6 +6,34 @@ This log tracks important decisions made during the project.
 
 ---
 
+## 2026-07-03: Per-thread SQLite connections (dashboard parallel-poll crash)
+
+**Decision:** `db.py` hands each thread its own SQLite connection for file databases
+(generation-invalidated via `reset_conn()`); `:memory:` test databases keep the single shared
+connection (TestClient serializes requests, and separate connections would see separate DBs).
+
+**Context:** Found while live-smoking the Phase 5b dashboard on macOS. The app shared one global
+`sqlite3.Connection` (`check_same_thread=False`) across FastAPI threadpool threads. The
+dashboard polls with `Promise.all` — four concurrent requests — and on Python builds where
+`sqlite3.threadsafety == 1` (e.g. macOS system libsqlite3) concurrent statements on a shared
+connection corrupt the heap: observed as SIGSEGV inside `sqlite3Prepare` (fault address was
+ASCII column-name bytes) and one `sqlite3.DatabaseError: database disk image is malformed`.
+
+**Impact:** This code shipped on the Windows LAN box, whose service manager auto-restarts on
+crash — meaning crashes could have been silently masked. Redeploying Phase 5b brings the fix
+live; worth checking the manager's restart history afterwards.
+
+**Alternatives Considered:**
+- Serialize all DB access behind one lock: throttles the read-mostly dashboard workload.
+- Connection pool: overkill for a single-process SQLite service; per-thread is the idiomatic fix
+  under WAL (readers don't block; writes covered by busy timeout + `retry_on_locked`).
+
+**Decided By:** claude (found + fixed in 5b Cycle 1) + codex (APPROVE, impl round 1)
+
+**Phase:** 5b (Cycle 1)
+
+---
+
 ## 2026-07-02: First LAN deployment live — hosting milestone COMPLETE
 
 **Decision:** Bugalizer is deployed and hosted on the Windows GPU box via the LAN Service
