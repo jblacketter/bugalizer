@@ -715,14 +715,20 @@ def reports_eligible_for_fix() -> list[dict[str, Any]]:
     Eligible when:
     - Report is in status `triaged`.
     - Has at least one completed localization analysis.
-    - Does NOT yet have a fix_proposals row for its latest completed
-      localization analysis.
+    - The latest completed localization is *fresh*: its `result.repo_sha`
+      matches the project's `head_sha`. Stale localization is excluded so
+      the paid cloud fix model never runs on out-of-date file evidence and
+      never races Stage 3 re-localization (see
+      `docs/phases/phase-4-fix-proposals.md`).
+    - Does NOT yet have a fix_proposals row for that latest localization
+      analysis.
     - Not soft-deleted.
     """
     conn = _get_conn()
     rows = conn.execute(
-        """SELECT br.*
+        """SELECT br.*, p.head_sha AS project_head_sha
            FROM bug_reports br
+           JOIN projects p ON br.project_id = p.id
            WHERE br.status = 'triaged'
            AND (br.resolution_reason IS NULL OR br.resolution_reason != 'deleted')
            AND EXISTS (
@@ -730,21 +736,47 @@ def reports_eligible_for_fix() -> list[dict[str, Any]]:
                WHERE a.bug_report_id = br.id
                AND a.phase = 'localization' AND a.status = 'completed'
            )
-           AND NOT EXISTS (
-               SELECT 1 FROM fix_proposals fp
-               JOIN analyses a ON fp.analysis_id = a.id
-               WHERE fp.bug_report_id = br.id
-               AND a.phase = 'localization' AND a.status = 'completed'
-               AND a.id = (
-                   SELECT id FROM analyses a2
-                   WHERE a2.bug_report_id = br.id
-                   AND a2.phase = 'localization' AND a2.status = 'completed'
-                   ORDER BY a2.created_at DESC LIMIT 1
-               )
-           )
            ORDER BY br.created_at ASC"""
     ).fetchall()
-    return [_report_row_to_dict(r) for r in rows]
+
+    eligible: list[dict[str, Any]] = []
+    for row in rows:
+        report = _report_row_to_dict(row)
+        project_head_sha = row["project_head_sha"]
+
+        # Latest completed localization for this report.
+        loc = conn.execute(
+            """SELECT id, result FROM analyses
+               WHERE bug_report_id = ?
+               AND phase = 'localization' AND status = 'completed'
+               ORDER BY created_at DESC LIMIT 1""",
+            (report["id"],),
+        ).fetchone()
+        if loc is None:
+            continue
+
+        # Freshness gate: require a known project HEAD and a matching
+        # localization repo_sha. Missing/unparseable SHA is treated as stale.
+        if not project_head_sha:
+            continue
+        try:
+            result = json.loads(loc["result"]) if loc["result"] else {}
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(result, dict) or result.get("repo_sha") != project_head_sha:
+            continue
+
+        # Skip if a proposal already exists for this exact localization.
+        already = conn.execute(
+            "SELECT 1 FROM fix_proposals WHERE bug_report_id = ? AND analysis_id = ? LIMIT 1",
+            (report["id"], loc["id"]),
+        ).fetchone()
+        if already is not None:
+            continue
+
+        eligible.append(report)
+
+    return eligible
 
 
 def latest_completed_localization(bug_report_id: str) -> Optional[dict[str, Any]]:

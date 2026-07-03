@@ -51,7 +51,9 @@ def _seed_fixture_report(tmp_path):
     (repo_root / "app.py").write_text(
         "def divide(a, b):\n    return a / b\n", encoding="utf-8"
     )
-    db.project_update(project["id"], repo_path=str(repo_root))
+    # Project HEAD matches the localization repo_sha below ("deadbeef") so
+    # the report is SHA-fresh and passes the Stage 4 freshness gate.
+    db.project_update(project["id"], repo_path=str(repo_root), head_sha="deadbeef")
 
     report = report_create(
         project_id=project["id"],
@@ -317,5 +319,28 @@ async def test_propose_fix_no_localization_returns_to_triaged(tmp_path):
     await propose_fix(report["id"])
 
     # Returned to triaged; no proposal created.
+    assert report_get(report["id"])["status"] == "triaged"
+    assert fix_proposals_for_report(report["id"]) == []
+
+
+@pytest.mark.asyncio
+async def test_propose_fix_rejects_stale_localization(tmp_path):
+    """Defensive freshness gate: if the project HEAD advanced after
+    eligibility was sampled (localization repo_sha != project head_sha),
+    propose_fix must NOT call the paid LLM and must return the report to
+    triaged so Stage 3 can re-localize."""
+    report, _ = _seed_fixture_report(tmp_path)
+
+    # Simulate HEAD advancing after this report was sampled as eligible:
+    # the fixture localization carries repo_sha="deadbeef".
+    db.project_update(report["project_id"], head_sha="newhead111")
+
+    with patch(
+        "bugalizer.pipeline.fix_proposer.llm_client.complete",
+        new=AsyncMock(),
+    ) as mock_llm:
+        await propose_fix(report["id"])
+        mock_llm.assert_not_called()
+
     assert report_get(report["id"])["status"] == "triaged"
     assert fix_proposals_for_report(report["id"]) == []

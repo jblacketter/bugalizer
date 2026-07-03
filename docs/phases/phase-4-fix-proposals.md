@@ -39,6 +39,11 @@ and exposed read-only over the API.
 
 - Eligibility (`db.py::reports_eligible_for_fix`): status `triaged`, completed localization
   whose `repo_sha` matches `project.head_sha`, and no existing fix proposal for that SHA.
+  Stale-localization reports (SHA mismatch, missing `repo_sha`, or unknown project HEAD) are
+  excluded from Stage 4 and instead re-localized by Stage 3, so the paid cloud fix model never
+  runs on out-of-date evidence and cannot race re-localization.
+- Defensive freshness re-check in `propose_fix()` after the claim wins: if HEAD advanced
+  between eligibility sampling and the claim, the stage aborts to `triaged` without an LLM call.
 - Atomic claim via `try_claim_report()` (compare-and-set) prevents double-processing.
 - File bundle honors `_validate_candidate_path()` path-safety on LLM-provided localization
   paths; per-file and total byte caps bound the prompt size.
@@ -56,7 +61,8 @@ and exposed read-only over the API.
 - `src/bugalizer/models.py` (`FIX_PROPOSING` state, phase-gating update)
 - `src/bugalizer/api/reports.py` (`GET /reports/{id}/fix_proposals`)
 - `src/bugalizer/config.py`, `src/bugalizer/llm/client.py` (provider + fallbacks)
-- `tests/` — fix_proposer, API, and queue-eligibility coverage (139 total passing)
+- `tests/` — fix_proposer, API, and queue-eligibility coverage, incl. stale-localization
+  exclusion + defensive re-check regressions (142 total passing)
 
 ## Success Criteria
 

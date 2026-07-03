@@ -245,6 +245,19 @@ async def propose_fix(report_id: str) -> None:
         if not project or not project.get("repo_path"):
             raise FixProposalError("Report project has no repo_path; cannot read files")
 
+        # Defensive freshness gate: never spend a paid cloud call on stale
+        # file evidence. The eligibility query already filters stale
+        # localization out, but re-check here in case HEAD advanced (or a
+        # re-localization landed) between sampling and this claim winning.
+        head_sha = project.get("head_sha")
+        result = analysis.get("result")
+        loc_sha = result.get("repo_sha") if isinstance(result, dict) else None
+        if not head_sha or loc_sha != head_sha:
+            raise FixProposalError(
+                f"Localization is stale (repo_sha={loc_sha!r} != "
+                f"project head_sha={head_sha!r}); skipping fix proposal"
+            )
+
         # 2. Gather candidate files, bounded by size caps.
         candidates = _collect_candidate_files(analysis)
         if not candidates:
