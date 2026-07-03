@@ -72,9 +72,14 @@ Mirror the triage retry pattern for Stages 3 and 4:
       retry is a paid cloud call) enforced in `db.py::reports_eligible_for_fix`. Distinguish
       transient errors (timeout, 429/5xx → retry) from permanent ones (invalid diff output,
       auth failure → no retry) where litellm exposes the difference.
-- [ ] Reports that exhaust retries stay visible: surface a `failed_stage` / `last_error` in
-      `GET /reports/{id}` and in the queue overview, and extend `POST /api/v1/queue/{id}/retry`
-      to reset Stage 3/4 retry counts (today it only handles triage).
+- [ ] Reports that exhaust retries stay in `triaged` but are excluded from dispatch by the
+      eligibility queries themselves — retry exhaustion is *derived from failed Stage 3/4 analysis
+      rows* (mirroring how `triage_eligible_reports` counts failed triage rows), not stored as a
+      separate status. `failed_stage` / `last_error` surfaced in `GET /reports/{id}` and the queue
+      overview are computed from the latest failed analysis row for the stage. `POST
+      /api/v1/queue/{id}/retry` re-enables a report by deleting its failed Stage 3/4 analysis rows
+      (today it only clears triage), which drops the derived count back below the cap. (Reviewer-
+      resolved: keep exhausted reports in `triaged`, do not overload `deferred`.)
 - [ ] **Real health check:** `/health` should report DB reachability and Ollama reachability
       (cheap `GET {ollama_host}/api/tags` with short timeout), plus worker-alive status. Keep a
       liveness-only variant for the process supervisor.
@@ -105,24 +110,51 @@ crypto remains in the codebase; decision logged.
 
 ## 5.3 Per-report analysis tier: local LLM vs cloud AI
 
-Design (recommendation — confirm in review):
+**Analysis mode.**
 
-- [ ] Add `analysis_mode` to bug reports: `auto` (default — current behavior: local triage +
-      localize, cloud fix when eligible), `local_only` (never call the cloud; stop after
+- [ ] Add `analysis_mode` to bug reports: `auto` (**default**, preserves today's behavior: local
+      triage + localize, cloud fix when eligible), `local_only` (never call the cloud; stop after
       localization), `hold` (validate + dedupe only; wait for a human to pick a tier).
-- [ ] Add `POST /api/v1/reports/{id}/analyze` with body `{"tier": "local" | "cloud"}`:
-      - `local` → run/re-run triage + localization on Ollama.
-      - `cloud` → run the Stage 4 fix proposal (requires completed localization; 409 otherwise,
-        matching existing eligibility rules in `reports_eligible_for_fix`).
-      This is what the dashboard's two buttons call.
-- [ ] Wire the existing per-project `llm_provider` / `llm_model` fields (`models.py:186-190`)
-      into the pipeline so a project can pin its models; global settings remain the fallback.
-      (These fields are currently stored and ignored.)
-- [ ] Eligibility queries in `db.py` respect `analysis_mode` (`hold` reports never auto-dispatch;
-      `local_only` reports never reach Stage 4).
+- [ ] Eligibility queries in `db.py` respect `analysis_mode`: `hold` reports never auto-dispatch to
+      any stage; `local_only` reports are never eligible for Stage 4 (`reports_eligible_for_fix`
+      excludes them). `auto` is unchanged.
+- [ ] Add `POST /api/v1/reports/{id}/analyze` with body `{"tier": "local" | "cloud"}` (the
+      dashboard's two buttons):
+      - `local` → run/re-run triage + localization on the local provider.
+      - `cloud` → run the Stage 4 fix proposal. Requires a completed, SHA-fresh localization (409
+        otherwise, matching the Phase 4 eligibility rules in `reports_eligible_for_fix`). Manual
+        `analyze cloud` is an explicit user action, so it overrides `local_only`/`hold` for that
+        one report — the mode gates *automatic* dispatch, not an explicit request.
 
-**Acceptance:** a bug can sit in the queue untouched (`hold`), be analyzed locally on demand, and
-be escalated to cloud AI on demand; `auto` preserves today's behavior; tests cover mode gating.
+**Model/provider precedence and scope (reviewer-required amendment).**
+
+The Project model has a *single* `llm_provider`/`llm_model` pair defaulting to
+`ollama` / `qwen2.5-coder:7b` (`models.py:190-191`). To avoid regressing Phase 4 — where Stage 4
+must go to the cloud fix provider (`fix_provider` / `default_fix_model`, default
+`anthropic` / `claude-sonnet-4-6`) — the two are kept in **separate namespaces**:
+
+- [ ] **Existing `llm_provider` / `llm_model` scope local stages ONLY** (triage + localization).
+      They are never consulted by Stage 4. Wiring them in means: triage/localize resolve their
+      model as `report/project override → global `default_triage_model` / `default_localize_model``.
+      A project left at the `ollama` default therefore keeps exactly today's local behavior.
+- [ ] **Stage 4 gets its own optional per-project override fields**, added in this slice:
+      `fix_llm_provider` / `fix_llm_model` (nullable; `NULL` = use global `fix_provider` /
+      `default_fix_model`). Stage 4 resolves as `report fix override → project fix override →
+      global fix settings`. The default project (with these `NULL`) keeps the Phase 4 cloud fix
+      path untouched.
+- [ ] **Precedence, stated once:** for every stage the order is
+      `per-report override → per-project override → global setting`. Local stages read the
+      `llm_*` fields; Stage 4 reads the `fix_llm_*` fields. There is no path by which a project's
+      `llm_provider=ollama` reaches Stage 4.
+- [ ] `analysis_mode=local_only` stops before Stage 4 regardless of any `fix_llm_*` value (mode
+      gate wins over provider config). `POST .../analyze {"tier":"cloud"}` uses the resolved Stage 4
+      fix provider/model (per the precedence above), not the local `llm_*` fields.
+
+**Acceptance:** a bug can sit in the queue untouched (`hold`), be analyzed locally on demand, and be
+escalated to cloud AI on demand; `auto` preserves today's behavior; **an existing project with the
+default `llm_provider=ollama` still runs Stage 4 through the cloud fix provider, never Ollama**;
+tests cover mode gating AND provider resolution for each stage (explicitly: default-project Stage 4
+resolves to `anthropic`/`claude-sonnet-4-6`, and a project `fix_llm_*` override is honored).
 
 ## 5.4 Minimal queue dashboard ("watch bugs stack up")
 
@@ -186,12 +218,20 @@ Definition of done for the phase: all acceptance criteria above; full test suite
 (142 existing + new coverage for retries, analysis modes, and the reports list endpoint);
 service running on the LAN box past a reboot; smoke test recorded in `docs/decision_log.md`.
 
-## Open questions for review
+## Resolved decisions (round 1, reviewer-confirmed)
 
-1. `analysis_mode` default: `auto` (bugs flow through local stages immediately) or `hold`
-   (nothing runs until a human clicks)? Draft assumes `auto` with `hold` available per report.
-2. Retry-exhausted reports: park in `deferred` (existing state) or stay `triaged` with a
-   `failed_stage` marker? Draft assumes the marker, to avoid overloading `deferred`.
-3. Fernet stub: remove (recommended) or implement?
-4. Dashboard tech: plain fetch-polling vs htmx vs SSE. Draft assumes plain polling — matches the
-   worker's own 5s cadence and keeps zero dependencies.
+1. **`analysis_mode` default = `auto`.** Bugs flow through the local stages immediately; `hold` and
+   `local_only` are opt-in per report.
+2. **Retry-exhausted reports stay `triaged`, not `deferred`.** Exhaustion is *derived from failed
+   Stage 3/4 analysis rows* by the eligibility queries (mirroring triage), so an exhausted report is
+   simply not re-dispatched; `failed_stage`/`last_error` are computed from the latest failed row.
+   `POST /queue/{id}/retry` clears those failed rows to re-enable dispatch. (See §5.1.)
+3. **Fernet stub: remove it.** Drop `settings.secret_key` and the unused
+   `projects.api_key_encrypted` reference; secrets come from env only. Decision recorded in
+   `docs/decision_log.md` as part of §5.2.
+4. **Dashboard tech: plain fetch-polling** (no htmx/SSE) — matches the worker's own 5s cadence and
+   keeps zero front-end dependencies.
+5. **Stage 4 provider isolation (from round-1 §5.3 changes):** per-project `llm_provider`/`llm_model`
+   scope local stages only; Stage 4 uses `fix_llm_*` overrides falling back to global
+   `fix_provider`/`default_fix_model`, so a default `ollama` project never routes cloud fixes to
+   Ollama. (See §5.3.)
