@@ -300,6 +300,64 @@ def test_analyze_cloud_fresh_dispatches_and_overrides_local_only():
     mock_fix.assert_awaited_once_with(report["id"])
 
 
+def test_analyze_local_dispatches_from_clarification_needed():
+    """A clarification_needed report can be pushed on with a manual local
+    analysis — the button must not 409 on exactly the reports that need it."""
+    project = _project()
+    report = _triaged_report(project)
+    report_update_status(report["id"], "clarification_needed")
+
+    mock_run = AsyncMock()
+    with patch("bugalizer.api.reports.run_local_analysis", mock_run):
+        r = client.post(
+            f"/api/v1/reports/{report['id']}/analyze", json={"tier": "local"}
+        )
+    assert r.status_code == 202
+    assert r.json()["tier"] == "local"
+    mock_run.assert_awaited_once_with(report["id"])
+
+
+def test_analyze_cloud_from_clarification_needed_is_409():
+    """Cloud analysis still requires 'triaged' (localization must run first)."""
+    project = _project()
+    report = _triaged_report(project)
+    report_update_status(report["id"], "clarification_needed")
+    r = client.post(
+        f"/api/v1/reports/{report['id']}/analyze", json={"tier": "cloud"}
+    )
+    assert r.status_code == 409
+    assert "triaged" in r.json()["detail"].lower()
+
+
+def test_reports_list_flags_localized():
+    """The board needs an at-a-glance 'analyzed locally' signal: each list row
+    carries `localized` (has a completed localization)."""
+    project = _project()
+    r_plain = _triaged_report(project, title="no-loc")
+    r_loc = _triaged_report(project, title="has-loc")
+    _add_fresh_localization(r_loc["id"])
+
+    by_id = {x["id"]: x for x in client.get("/api/v1/reports").json()["reports"]}
+    assert by_id[r_loc["id"]]["localized"] is True
+    assert by_id[r_plain["id"]]["localized"] is False
+
+
+def test_report_detail_flags_localized():
+    project = _project()
+    r = _triaged_report(project)
+    assert client.get(f"/api/v1/reports/{r['id']}").json()["localized"] is False
+    _add_fresh_localization(r["id"])
+    assert client.get(f"/api/v1/reports/{r['id']}").json()["localized"] is True
+
+
+def test_auto_fix_disabled_by_default():
+    """Stage 4 fix auto-dispatch is opt-in — off unless explicitly enabled, so
+    reports settle at 'triaged' with localization instead of failing fix rows."""
+    from bugalizer.config import Settings
+
+    assert Settings.model_fields["auto_fix_enabled"].default is False
+
+
 # ---------------------------------------------------------------------------
 # Provider/model resolution
 # ---------------------------------------------------------------------------

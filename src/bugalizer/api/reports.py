@@ -17,6 +17,7 @@ from bugalizer.db import (
     report_delete,
     report_failure_info,
     report_get,
+    report_ids_with_localization,
     report_list,
     report_update_fields,
     report_update_status,
@@ -139,9 +140,11 @@ def list_reports(
         project_id=project_id, status=status,
         limit=limit, offset=offset, order=order,
     )
+    localized_ids = report_ids_with_localization()
     responses = []
     for r in rows:
         resp = _row_to_response(r)
+        resp.localized = r["id"] in localized_ids
         failure = report_failure_info(r["id"])
         if failure:
             resp.failed_stage = failure["failed_stage"]
@@ -163,6 +166,7 @@ def get_report(
     if not row:
         raise HTTPException(status_code=404, detail="Bug report not found")
     resp = _row_to_response(row)
+    resp.localized = latest_completed_localization(report_id) is not None
     failure = report_failure_info(report_id)
     if failure:
         resp.failed_stage = failure["failed_stage"]
@@ -254,19 +258,30 @@ async def analyze_report(
     if not row:
         raise HTTPException(status_code=404, detail="Bug report not found")
 
-    if row["status"] != "triaged":
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Report is in status '{row['status']}'; manual analysis "
-                "requires 'triaged' (not already claimed by a pipeline stage)"
-            ),
-        )
-
     if body.tier == AnalysisTier.LOCAL:
+        # Local (re-)analysis is a manual override: allow it from 'triaged' or
+        # from 'clarification_needed' (the whole point is to push a report the
+        # triage model flagged for clarification on into localization). Reject
+        # only transient claim states already owned by a pipeline stage.
+        if row["status"] not in ("triaged", "clarification_needed"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Report is in status '{row['status']}'; manual local "
+                    "analysis requires 'triaged' or 'clarification_needed'"
+                ),
+            )
         background_tasks.add_task(run_local_analysis, report_id)
         detail = "Local triage + localization dispatched"
     else:
+        if row["status"] != "triaged":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Report is in status '{row['status']}'; cloud analysis "
+                    "requires 'triaged' (run local analysis first)"
+                ),
+            )
         # Cloud tier: enforce the same completed + SHA-fresh localization
         # preconditions as reports_eligible_for_fix, but as a 409 the caller
         # can act on. (propose_fix re-checks defensively after its claim.)

@@ -7,9 +7,10 @@ import functools
 import json
 import logging
 import sqlite3
+import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional, TypeVar
 
 from bugalizer.config import settings
@@ -97,8 +98,28 @@ def _migrate(conn: sqlite3.Connection) -> None:
         logger.info("Migration: added bug_reports.analysis_mode column")
 
 
+_now_lock = threading.Lock()
+_last_now_dt: Optional[datetime] = None
+
+
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    """UTC ISO-8601 timestamp, strictly monotonic within this process.
+
+    Windows' system clock has ~16 ms resolution, so two events created in the
+    same tick would otherwise share a `created_at`. Much of this layer sequences
+    events by comparing `created_at` lexicographically with strict `>` (and via
+    `ORDER BY created_at`); equal timestamps break that ordering — e.g. a fix
+    failure recorded in the same tick as its localization would not count toward
+    the retry cap. Nudge each call at least one microsecond past the previous so
+    sequential inserts always compare strictly increasing.
+    """
+    global _last_now_dt
+    with _now_lock:
+        dt = datetime.now(timezone.utc)
+        if _last_now_dt is not None and dt <= _last_now_dt:
+            dt = _last_now_dt + timedelta(microseconds=1)
+        _last_now_dt = dt
+        return dt.isoformat()
 
 
 def _new_id() -> str:
@@ -948,6 +969,20 @@ def latest_completed_localization(bug_report_id: str) -> Optional[dict[str, Any]
         (bug_report_id,),
     ).fetchone()
     return _analysis_row_to_dict(row) if row else None
+
+
+def report_ids_with_localization() -> set[str]:
+    """Set of report IDs with at least one completed localization analysis.
+
+    One query for the whole board — lets the reports list flag analyzed cards
+    without an N+1 per-report lookup.
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT DISTINCT bug_report_id FROM analyses "
+        "WHERE phase = 'localization' AND status = 'completed'"
+    ).fetchall()
+    return {row["bug_report_id"] for row in rows}
 
 
 def reset_triage_retries(bug_report_id: str) -> bool:

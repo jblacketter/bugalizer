@@ -70,11 +70,16 @@ async def _poll_loop() -> None:
 
             # Stage 4: fix-proposal-eligible reports (triaged + completed
             # localization + no fix proposal yet) — dispatch concurrently.
-            for report in reports_eligible_for_fix():
-                task = asyncio.create_task(
-                    _process_with_semaphore(semaphore, process_fix_proposal(report["id"]))
-                )
-                tasks.append(task)
+            # Opt-in only: each fix is a paid cloud call and local models can't
+            # reliably produce a valid patch, so auto-fixing is off by default
+            # and reports settle at 'triaged' with their localization. Fixes run
+            # on demand via the "Analyze (cloud)" action.
+            if settings.auto_fix_enabled:
+                for report in reports_eligible_for_fix():
+                    task = asyncio.create_task(
+                        _process_with_semaphore(semaphore, process_fix_proposal(report["id"]))
+                    )
+                    tasks.append(task)
 
             # Await all dispatched tasks for this cycle
             if tasks:

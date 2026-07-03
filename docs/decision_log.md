@@ -6,6 +6,48 @@ This log tracks important decisions made during the project.
 
 ---
 
+## 2026-07-02: First LAN deployment live — hosting milestone COMPLETE
+
+**Decision:** Bugalizer is deployed and hosted on the Windows GPU box via the LAN Service
+Manager (`http://127.0.0.1:9000`) at `https://bugalizer.lan/` (Caddy reverse proxy →
+`127.0.0.1:8090`, manager-supervised with auto-restart + boot start). This closes the
+first/initial hosting phase. Remaining bugs and UI work are deferred to the next phase.
+
+**Verified (this session):**
+- Full local pipeline end-to-end against **real Ollama** (`qwen2.5-coder:7b`): validation →
+  triage (structured output) → two-pass localization correctly pinpointed
+  `db.py:reports_eligible_for_fix` + root cause. Health `database/ollama/worker` all green.
+- Auth enforced (401 without `X-API-Key`, 200 with) — verified both on `127.0.0.1:8090` and
+  through Caddy at `https://bugalizer.lan/`.
+- Project create + git clone (HTTPS), dashboard served at `/`, 191/191 tests passing.
+- LAN wiring: registered with the Service Manager; added the missing
+  `127.0.0.1  bugalizer.lan` hosts entry (the manager does not auto-add hosts records).
+
+**Bugs fixed en route (both matter on the Windows target):**
+- Test env leak: `conftest.py` now clears `QA_LLM_*` so the suite exercises shipped defaults.
+- **Windows coarse-clock bug:** `_now()` returned duplicate timestamps within a ~16 ms tick,
+  breaking the strict-`>` `created_at` ordering the retry gate / `ORDER BY` rely on. `_now()`
+  is now strictly monotonic per process.
+
+**Config posture:** local LLM is the default for all stages (free, GPU); cloud (Anthropic) is an
+explicit, cost-flagged opt-in. Pinned `BUGALIZER_FIX_PROVIDER=ollama` in `.env`.
+
+**Known limitation / follow-ups (next phase — "bugs + UI work"):**
+- **Stage 4 (fix proposals) unreliable on local Ollama** (7b *and* 14b): the model ignores the
+  required schema and returns a generic JSON example. Options: opt into Anthropic (works, paid),
+  or add Ollama schema-constrained structured output / reformat-retry loop to make local fixes
+  viable. Reports currently settle at `triaged` with localization when fix fails.
+- Triage (7b) is conservative — tends to return `clarification_needed` even for detailed reports.
+- Full smoke test §4–6 (manual `hold`-mode analysis, cloud escalation, and reboot-survival from a
+  second LAN machine) still pending real-hardware validation.
+- Dashboard UI polish + open bugs: tracked for the next phase.
+
+**Decided By:** Human (jack) + claude
+
+**Phase:** 5 (§5.5 smoke test / deployment) — hosting milestone complete
+
+---
+
 ## 2026-07-02: Adopt Phase 5 — Deployment Readiness & Queue Dashboard
 
 **Decision:** The next phase is `docs/phases/phase-5-deployment-readiness.md`: worker retry

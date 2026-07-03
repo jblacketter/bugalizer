@@ -61,6 +61,8 @@
   .badge.sev { color: #10141a; border: none; font-weight: 600; }
   .badge.fail { background: #4a2f2f; color: #f0c0c0; border-color: #6a4040; }
   .badge.mode { color: var(--warn); border-color: var(--warn); }
+  .badge.done { color: var(--ok); border-color: var(--ok); }
+  .badge.big { font-size: 11px; padding: 3px 9px; }
   /* Detail drawer */
   #overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 10;
@@ -91,6 +93,11 @@
   button:hover { border-color: var(--accent); }
   button.primary { background: #1d4066; border-color: #2b5a8c; }
   button.danger-confirm { background: #5c3b1e; border-color: var(--warn); }
+  .analysis-chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0 2px; align-items: center; }
+  .reconfirm {
+    display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    background: #3a2f1e; border: 1px solid var(--warn); border-radius: 6px; padding: 4px 6px 4px 10px;
+  }
   select {
     background: var(--card); border: 1px solid var(--border); color: var(--text);
     border-radius: 6px; padding: 6px 8px; font-size: 13px;
@@ -141,6 +148,10 @@ let apiKey = localStorage.getItem("bugalizer_api_key") || "";
 let projects = {};          // id -> name
 let openReportId = null;    // detail drawer state
 let cloudArmed = false;     // two-click confirm for the paid button
+let localArmed = false;     // inline confirm for re-analyzing an analyzed report
+let pollFailures = 0;       // consecutive failed polls — debounce the "offline" banner
+let detailReady = false;    // drawer has rendered good content at least once
+const confirmArmed = () => cloudArmed || localArmed;
 
 class ApiError extends Error {
   constructor(status, detail) { super(detail); this.status = status; }
@@ -183,6 +194,8 @@ function cardHtml(r) {
   ];
   if (r.analysis_mode && r.analysis_mode !== "auto")
     badges.push(`<span class="badge mode">${esc(r.analysis_mode)}</span>`);
+  if (r.localized)
+    badges.push(`<span class="badge done" title="Localized — analyzed locally">✓ localized</span>`);
   if (r.failed_stage)
     badges.push(`<span class="badge fail" title="${esc(r.last_error)}">⚠ ${esc(r.failed_stage)} failed</span>`);
   const nonDefault = !COLUMNS.some(c => c.statuses[0] === r.status);
@@ -234,13 +247,24 @@ async function refresh() {
     renderUsage(usage);
     setPollState(true, `${queue.total} reports · updated ${new Date().toLocaleTimeString()}`);
     hideBanner();
-    if (openReportId) refreshDetail(openReportId);  // keep the drawer live
+    pollFailures = 0;
+    // Keep the drawer live — but don't re-render out from under an armed
+    // confirm (re-analyze / cloud), or we'd wipe the user's pending choice.
+    if (openReportId && !confirmArmed()) refreshDetail(openReportId);
   } catch (e) {
-    setPollState(false, "poll failed");
     if (e.status === 401 || e.status === 403) {
+      pollFailures = 0;                    // auth is a real config issue, not a blip
+      setPollState(false, "auth required");
       showBanner("API key required or invalid — enter it in the top-right box.");
-    } else {
-      showBanner("Cannot reach the Bugalizer API: " + esc(e.message));
+      return;
+    }
+    // A dropped keep-alive/QUIC connection can fail one poll; the board keeps
+    // its last-good render. Don't alarm the user until several polls in a row
+    // fail — otherwise a momentary blip flashes a scary banner every few seconds.
+    pollFailures++;
+    setPollState(false, pollFailures < 3 ? "reconnecting…" : "offline");
+    if (pollFailures >= 3) {
+      showBanner("Cannot reach the Bugalizer API (retrying): " + esc(e.message));
     }
   }
 }
@@ -259,6 +283,8 @@ function hideBanner() { $("#banner").classList.remove("show"); }
 async function openDetail(id) {
   openReportId = id;
   cloudArmed = false;
+  localArmed = false;
+  detailReady = false;
   $("#overlay").classList.add("show");
   $("#detail").classList.add("show");
   $("#detail").innerHTML = `<p class="kv">Loading…</p>`;
@@ -267,6 +293,8 @@ async function openDetail(id) {
 
 function closeDetail() {
   openReportId = null;
+  cloudArmed = false;
+  localArmed = false;
   $("#overlay").classList.remove("show");
   $("#detail").classList.remove("show");
 }
@@ -281,9 +309,16 @@ async function refreshDetail(id) {
     ]);
     try { localization = await api(`/reports/${id}/localization`); } catch (e) { /* none yet */ }
   } catch (e) {
-    $("#detail").innerHTML = `<p class="kv">Failed to load report: ${esc(e.message)}</p>`;
+    // Keep the last-good drawer through a transient blip; only surface an error
+    // if we never managed to load it (so the detail text doesn't vanish and
+    // reappear every poll while the connection flaps).
+    if (!detailReady) {
+      $("#detail").innerHTML = `<p class="kv">Failed to load report: ${esc(e.message)}</p>`;
+    }
     return;
   }
+  if (openReportId !== id) return;   // drawer changed/closed mid-request
+  detailReady = true;
   renderDetail(report, analyses.analyses, localization, fixes.fix_proposals);
 }
 
@@ -316,9 +351,32 @@ function fixSection(fixes) {
 }
 
 function renderDetail(r, analyses, loc, fixes) {
-  const failure = r.failed_stage
-    ? `<section><h3>Failure</h3><p class="badge fail">⚠ ${esc(r.failed_stage)}</p>
-       <pre>${esc(r.last_error || "")}</pre></section>` : "";
+  let failure = "";
+  if (r.failed_stage === "fix") {
+    // A fix-stage failure isn't a broken report — triage/localization below are
+    // intact. Local models often can't produce a valid patch; a fix needs a
+    // capable cloud provider. Keep this calm and actionable, not alarming.
+    failure = `<section><h3>Automated fix</h3><p class="kv">No automated fix was
+      generated for this report. Triage and localization are unaffected. A fix
+      proposal needs a capable cloud fix provider — use <b>Analyze (cloud)</b>
+      once one is configured.</p></section>`;
+  } else if (r.failed_stage) {
+    failure = `<section><h3>Failure</h3><p class="badge fail">⚠ ${esc(r.failed_stage)}</p>
+       <pre>${esc(r.last_error || "")}</pre></section>`;
+  }
+  // Analysis state, at a glance. "Analyzed locally" = a completed localization
+  // exists (which implies triage ran). Drives both the status chips and whether
+  // the local button is a first-run or a guarded re-run.
+  const triageDone = analyses.some(a => a.phase === "triage" && a.status === "completed");
+  const locDone = analyses.find(a => a.phase === "localization" && a.status === "completed");
+  const analyzed = !!locDone;
+  const locWhen = locDone ? age(locDone.completed_at || locDone.created_at) : null;
+  const chip = (on, label) => `<span class="badge big ${on ? "done" : ""}">${on ? "✓" : "○"} ${label}</span>`;
+  const chips = `<div class="analysis-chips">
+    ${chip(triageDone, "Triaged")}
+    ${chip(analyzed, analyzed ? `Localized · ${locWhen} ago` : "Not localized")}
+  </div>`;
+
   $("#detail").innerHTML = `
     <button id="close-detail">✕</button>
     <h2>${esc(r.title)}</h2>
@@ -326,8 +384,11 @@ function renderDetail(r, analyses, loc, fixes) {
       <b>${esc(r.status)}</b> · ${esc(r.severity)} · ${esc(projects[r.project_id] || r.project_id)}
       · by ${esc(r.reporter)} · ${age(r.created_at)} old · id ${esc(r.id)}
     </div>
+    ${chips}
     <div class="actions">
-      <button id="act-local" class="primary">Analyze (local)</button>
+      <span id="local-slot">
+        <button id="act-local" class="primary">${analyzed ? "Re-analyze (local)" : "Analyze (local)"}</button>
+      </span>
       <button id="act-cloud">Analyze (cloud)</button>
       <button id="act-retry">Retry</button>
       <label class="kv">mode
@@ -344,10 +405,37 @@ function renderDetail(r, analyses, loc, fixes) {
     <section><h3>Fix proposals</h3>${fixSection(fixes)}</section>
   `;
   $("#close-detail").addEventListener("click", closeDetail);
-  $("#act-local").addEventListener("click", () => doAnalyze(r.id, "local"));
+  bindLocalButton(r.id, analyzed);
   $("#act-cloud").addEventListener("click", ev => confirmCloud(ev.target, r.id));
   $("#act-retry").addEventListener("click", () => doRetry(r.id));
   $("#mode-select").addEventListener("change", ev => doSetMode(r.id, ev.target.value));
+}
+
+// Local analysis button. First run fires immediately (expected action, no
+// friction). A re-run on an already-analyzed report arms an inline confirm with
+// an explicit Cancel, so a second, redundant analysis is deliberate — not a
+// stray click.
+function bindLocalButton(id, analyzed) {
+  const btn = $("#act-local");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    if (!analyzed) { doAnalyze(id, "local"); return; }
+    localArmed = true;
+    const slot = $("#local-slot");
+    slot.innerHTML = `<span class="reconfirm">
+      <span class="kv">⚠ Re-run local analysis? It re-does triage &amp; localization.</span>
+      <button id="local-yes" class="danger-confirm">Yes, re-analyze</button>
+      <button id="local-no">Cancel</button>
+    </span>`;
+    const disarm = () => {
+      localArmed = false;
+      slot.innerHTML = `<button id="act-local" class="primary">Re-analyze (local)</button>`;
+      bindLocalButton(id, true);
+    };
+    $("#local-yes").addEventListener("click", () => { localArmed = false; doAnalyze(id, "local"); });
+    $("#local-no").addEventListener("click", disarm);
+    setTimeout(() => { if (localArmed) disarm(); }, 8000);  // auto-cancel if ignored
+  });
 }
 
 // Two-click confirm for the paid cloud call (no blocking dialogs).

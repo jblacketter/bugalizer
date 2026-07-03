@@ -23,6 +23,14 @@ Thumbs.db
 
 # SQLite databases
 *.db
+*.db-shm
+*.db-wal
+
+# Runtime caches (repo-map, etc.)
+cache/
+
+# Cloned project repos (re-cloned on demand)
+repos/
 
 # Environment files
 .env

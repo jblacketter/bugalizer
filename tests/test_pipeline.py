@@ -339,3 +339,52 @@ async def test_process_triaged_with_mocked_llm():
     updated = report_get(report["id"])
     assert updated["status"] == "triaged"  # stays triaged (enriched)
     assert updated["feature_area"] == "buttons"
+
+
+# ---------------------------------------------------------------------------
+# Manual local analysis (run_local_analysis) — no re-triage
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_run_local_analysis_skips_retriage_when_already_triaged():
+    """Manual 'Analyze (local)' on a triaged report must NOT re-run triage
+    (the conservative local model would just re-flag clarification and bounce
+    it back) — it goes straight to localization."""
+    from bugalizer.db import report_update_status, analysis_create
+    from bugalizer.pipeline import orchestrator
+
+    project = _make_project()
+    report = _make_report(project["id"])
+    report_update_status(report["id"], "triaged")
+    analysis_create(report["id"], "triage", "completed",
+                    result={"summary": "s", "needs_clarification": False})
+
+    with patch.object(orchestrator, "process_triaged", new_callable=AsyncMock) as m_triage, \
+         patch.object(orchestrator, "process_localization", new_callable=AsyncMock) as m_local:
+        await orchestrator.run_local_analysis(report["id"])
+
+    m_triage.assert_not_awaited()
+    m_local.assert_awaited_once_with(report["id"])
+
+
+@pytest.mark.asyncio
+async def test_run_local_analysis_pushes_clarification_needed_to_triaged():
+    """A clarification_needed report is moved to 'triaged' and localized, not
+    re-triaged."""
+    from bugalizer.db import report_update_status, analysis_create
+    from bugalizer.pipeline import orchestrator
+
+    project = _make_project()
+    report = _make_report(project["id"])
+    report_update_status(report["id"], "triaged")
+    analysis_create(report["id"], "triage", "completed",
+                    result={"summary": "s", "needs_clarification": True})
+    report_update_status(report["id"], "clarification_needed")
+
+    with patch.object(orchestrator, "process_triaged", new_callable=AsyncMock) as m_triage, \
+         patch.object(orchestrator, "process_localization", new_callable=AsyncMock) as m_local:
+        await orchestrator.run_local_analysis(report["id"])
+
+    assert report_get(report["id"])["status"] == "triaged"
+    m_triage.assert_not_awaited()
+    m_local.assert_awaited_once_with(report["id"])

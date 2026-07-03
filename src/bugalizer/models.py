@@ -185,6 +185,9 @@ class BugReportResponse(BaseModel):
     # Populated when the report has an unresolved pipeline failure (retry gate).
     failed_stage: Optional[str] = None
     last_error: Optional[str] = None
+    # True when the report has at least one completed localization (i.e. it has
+    # been analyzed locally) — lets the dashboard flag analyzed cards at a glance.
+    localized: bool = False
 
 
 class BugReportListResponse(BaseModel):

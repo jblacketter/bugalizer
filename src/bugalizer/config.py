@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     queue_max_concurrent: int = 2
     queue_enabled: bool = True
 
+    # Auto-dispatch Stage 4 fix proposals from the queue worker. OFF by default:
+    # each fix is a paid cloud call, and local models can't reliably produce a
+    # valid patch — so fixes are opt-in via POST /reports/{id}/analyze
+    # {"tier":"cloud"} (the dashboard's "Analyze (cloud)" button). Set true only
+    # when a capable cloud fix provider is configured and auto-fixing is wanted.
+    auto_fix_enabled: bool = False
+
     # Pipeline
     duplicate_threshold: float = 0.8
     retry_delay_seconds: int = 60
@@ -73,9 +80,12 @@ class Settings(BaseSettings):
 
     # `.env` in the working directory is read on startup (§5.5 native-service
     # deploys); real environment variables always take precedence over it.
+    # The path is overridable via BUGALIZER_ENV_FILE so the test suite can
+    # disable it (set empty) — a deploy `.env` living in the repo root must not
+    # leak local overrides into tests.
     model_config = {
         "env_prefix": "BUGALIZER_",
-        "env_file": ".env",
+        "env_file": os.environ.get("BUGALIZER_ENV_FILE", ".env") or None,
         "env_file_encoding": "utf-8",
     }
 

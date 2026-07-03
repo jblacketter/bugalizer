@@ -197,13 +197,35 @@ async def process_localization(report_id: str) -> None:
 async def run_local_analysis(report_id: str) -> None:
     """Manual Stage 2 + Stage 3 dispatch (POST /reports/{id}/analyze, tier=local).
 
-    Runs triage then localization sequentially. Each stage does its own
-    atomic claim, so a report already claimed by the queue worker is skipped
-    safely. Deliberately does NOT consult `analysis_mode` — an explicit
-    request overrides `hold`/`local_only` for this one run (§5.3).
+    The user's intent is to get localization. Since the endpoint only admits
+    reports that already have a completed triage ('triaged' or
+    'clarification_needed'), we do NOT re-triage — the conservative local model
+    would just re-emit the same `clarification_needed` verdict and bounce the
+    report right back. Instead: move a `clarification_needed` report to
+    `triaged`, then run localization. Triage runs only as a fallback when no
+    completed triage exists yet.
+
+    Deliberately does NOT consult `analysis_mode` — an explicit request
+    overrides `hold`/`local_only` for this one run (§5.3).
     """
-    await process_triaged(report_id)
-    # If triage routed to clarification_needed, the localization claim on
+    report = report_get(report_id)
+    if not report:
+        return
+
+    # Push a clarification-gated report on: the user asked to analyze it anyway.
+    if report["status"] == "clarification_needed":
+        async with db_write_lock:
+            if try_claim_report(report_id, "clarification_needed", "analyzing"):
+                report_update_status(report_id, "triaged")
+
+    has_triage = any(
+        a.get("status") == "completed"
+        for a in analyses_for_report(report_id, phase="triage")
+    )
+    if not has_triage:
+        await process_triaged(report_id)
+
+    # If triage (re-)routed to clarification_needed, the localization claim on
     # 'triaged' fails and this is a silent no-op — correct behavior.
     await process_localization(report_id)
 
