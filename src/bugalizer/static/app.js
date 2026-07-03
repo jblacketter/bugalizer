@@ -26,6 +26,12 @@ const TIER_LABEL = { local: "local", cloud: "cloud" };
 
 let apiKey = localStorage.getItem("bugalizer_api_key") || "";
 let projects = {};          // id -> name
+let projectsCache = [];     // full project objects (filter select + Projects modal)
+let lastReports = [];       // last poll data — lets filters/toggles re-render
+let lastCounts = {};        //   without waiting for the next poll
+const filters = { project: "", severity: "", q: "", attn: false };
+let terminalOpen = localStorage.getItem("bugalizer_terminal_open") === "1";
+let terminalShowAll = false;
 let openReportId = null;    // detail drawer state
 let cloudArmed = false;     // inline confirm for the paid cloud call
 let localArmed = false;     // inline confirm for re-analyzing an analyzed report
@@ -118,21 +124,84 @@ function cardHtml(r) {
   </div>`;
 }
 
+// Client-side filters (§5b.3). Board only — the drawer always shows the
+// full report; global counts fall back to filtered-row counts while active.
+const filtersActive = () =>
+  !!(filters.project || filters.severity || filters.q || filters.attn);
+
+function applyFilters(rows) {
+  const q = filters.q.toLowerCase();
+  return rows.filter(r =>
+    (!filters.project || r.project_id === filters.project) &&
+    (!filters.severity || r.severity === filters.severity) &&
+    (!q || r.title.toLowerCase().includes(q)) &&
+    (!filters.attn || r.status === "clarification_needed"));
+}
+
+const TERMINAL_CARD_CAP = 15;
+
 function renderBoard(reports, counts) {
+  lastReports = reports;
+  lastCounts = counts;
+  const active = filtersActive();
+  const visible = applyFilters(reports);
   const board = $("#board");
   board.innerHTML = COLUMNS.map(col => {
-    const rows = reports.filter(r => col.statuses.includes(r.status));
-    const count = col.statuses.reduce((n, s) => n + (counts[s] || 0), 0);
-    const attn = counts["clarification_needed"] || 0;
+    const rows = visible.filter(r => col.statuses.includes(r.status));
+    // Unfiltered counts come from /queue (they include reports beyond the
+    // list limit); with filters on, count what's actually shown.
+    const count = active ? rows.length
+      : col.statuses.reduce((n, s) => n + (counts[s] || 0), 0);
+    const attn = active
+      ? rows.filter(r => r.status === "clarification_needed").length
+      : (counts["clarification_needed"] || 0);
     const attnHtml = (col.statuses.includes("clarification_needed") && attn)
       ? `<span class="attn-count" title="reports needing human input">? ${attn}</span>` : "";
+    // Terminal column collapses to a count (§5b.3) — it only grows over time.
+    let toggle = "", cardsHtml = "";
+    if (col.key === "terminal") {
+      toggle = `<span class="toggle" id="terminal-toggle" title="${terminalOpen ? "collapse" : "expand"}">${terminalOpen ? "▾" : "▸"}</span>`;
+      if (terminalOpen) {
+        const shown = terminalShowAll ? rows : rows.slice(0, TERMINAL_CARD_CAP);
+        cardsHtml = shown.map(cardHtml).join("");
+        if (!terminalShowAll && rows.length > TERMINAL_CARD_CAP)
+          cardsHtml += `<button class="show-all" id="terminal-show-all">show all ${rows.length}</button>`;
+      }
+    } else {
+      cardsHtml = rows.map(cardHtml).join("");
+    }
     return `<div class="col">
-      <h2>${col.label} <span class="count">${count}</span>${attnHtml}</h2>
-      <div class="cards">${rows.map(cardHtml).join("") || ""}</div>
+      <h2>${col.label} <span class="count">${count}</span>${attnHtml}${toggle}</h2>
+      <div class="cards">${cardsHtml}</div>
     </div>`;
   }).join("");
   board.querySelectorAll(".card").forEach(el =>
     el.addEventListener("click", () => openDetail(el.dataset.id)));
+  const tog = $("#terminal-toggle");
+  if (tog) tog.addEventListener("click", () => {
+    terminalOpen = !terminalOpen;
+    terminalShowAll = false;
+    localStorage.setItem("bugalizer_terminal_open", terminalOpen ? "1" : "0");
+    renderBoard(lastReports, lastCounts);
+  });
+  const all = $("#terminal-show-all");
+  if (all) all.addEventListener("click", () => {
+    terminalShowAll = true;
+    renderBoard(lastReports, lastCounts);
+  });
+}
+
+// Health LEDs (§5b.3): database / ollama / worker from /health. worker=null
+// means the queue worker is disabled (grey), not broken.
+function renderHealth(h) {
+  const el = $("#health-strip");
+  if (!h || !h.checks) { el.innerHTML = ""; return; }
+  const items = [["db", h.checks.database], ["ollama", h.checks.ollama], ["worker", h.checks.worker]];
+  el.innerHTML = items.map(([name, v]) => {
+    const cls = v === true ? "up" : v === false ? "down" : "off";
+    const state = v === true ? "up" : v === false ? "DOWN" : "disabled";
+    return `<span class="health-item" title="${name}: ${state}"><span class="led ${cls}"></span>${name}</span>`;
+  }).join("");
 }
 
 function renderUsage(u) {
@@ -151,14 +220,20 @@ function renderUsage(u) {
 
 async function refresh() {
   try {
-    const [queue, reportsResp, projectsResp, usage] = await Promise.all([
+    const [queue, reportsResp, projectsResp, usage, health] = await Promise.all([
       api("/queue"),
       api("/reports?limit=200"),
       api("/projects"),
       api("/usage"),
+      // /health is public (no /api/v1 prefix, no key) and must not fail the
+      // poll — a degraded component is data here, not an error.
+      fetch("/health").then(r => r.json()).catch(() => null),
     ]);
     projects = Object.fromEntries(projectsResp.projects.map(p => [p.id, p.name]));
+    projectsCache = projectsResp.projects;
+    syncProjectFilter();
     renderBoard(reportsResp.reports, queue.by_status);
+    renderHealth(health);
     renderUsage(usage);
     setPollState(true, `${queue.total} reports · updated ${new Date().toLocaleTimeString()}`);
     hideBanner();
@@ -380,9 +455,9 @@ function renderDetail(r, analyses, loc, fixes) {
       <span id="cloud-slot">
         <button id="act-cloud" class="tier-cloud">Analyze (cloud · $)</button>
       </span>
-      <button id="act-retry">Retry</button>
+      ${r.failed_stage ? `<button id="act-retry" title="Clear the failed ${esc(r.failed_stage)} attempts so the pipeline can retry">Retry</button>` : ""}
       <label class="kv">mode
-        <select id="mode-select">
+        <select id="mode-select" title="auto — pipeline dispatches automatically · local_only — never uses paid cloud · hold — nothing runs until you analyze manually">
           ${["auto", "local_only", "hold"].map(m =>
             `<option value="${m}" ${r.analysis_mode === m ? "selected" : ""}>${m}</option>`).join("")}
         </select>
@@ -398,7 +473,8 @@ function renderDetail(r, analyses, loc, fixes) {
   $("#close-detail").addEventListener("click", closeDetail);
   bindLocalButton(r.id, analyzed);
   bindCloudButton(r.id, r.last_cloud_analysis_at);
-  $("#act-retry").addEventListener("click", () => doRetry(r.id));
+  const retryBtn = $("#act-retry");
+  if (retryBtn) retryBtn.addEventListener("click", () => doRetry(r.id));
   $("#mode-select").addEventListener("change", ev => doSetMode(r.id, ev.target.value));
 }
 
@@ -482,6 +558,156 @@ async function doSetMode(id, mode) {
   } catch (e) { toast(e.message, true); }
 }
 
+// ---------------------------------------------------------------------------
+// Modals: new report + project management (§5b.4)
+// ---------------------------------------------------------------------------
+
+function openModal(html) {
+  $("#modal").innerHTML = html;
+  $("#modal-wrap").classList.add("show");
+  const close = $("#modal-close");
+  if (close) close.addEventListener("click", closeModal);
+}
+function closeModal() {
+  $("#modal-wrap").classList.remove("show");
+  $("#modal").innerHTML = "";
+}
+const modalOpen = () => $("#modal-wrap").classList.contains("show");
+
+function projectOptions(selected) {
+  return projectsCache.map(p =>
+    `<option value="${esc(p.id)}" ${p.id === selected ? "selected" : ""}>${esc(p.name)}</option>`).join("");
+}
+
+// "New report" — for demo/fake reports and quick manual capture.
+function showNewReport() {
+  if (!projectsCache.length) { toast("Create a project first", true); return; }
+  openModal(`
+    <h2>New report <button class="close" id="modal-close">✕</button></h2>
+    <div class="form-grid">
+      <label>project</label><select id="nr-project">${projectOptions()}</select>
+      <label>title</label><input id="nr-title" autofocus>
+      <label>severity</label>
+      <select id="nr-sev"><option>critical</option><option>high</option>
+        <option selected>medium</option><option>low</option></select>
+      <label>reporter</label><input id="nr-reporter" value="dashboard">
+      <label>description</label><textarea id="nr-desc"></textarea>
+    </div>
+    <div class="form-actions"><button id="nr-submit" class="tier-local">Submit report</button></div>`);
+  $("#nr-submit").addEventListener("click", async () => {
+    const body = {
+      project_id: $("#nr-project").value,
+      title: $("#nr-title").value.trim(),
+      description: $("#nr-desc").value.trim(),
+      severity: $("#nr-sev").value,
+      reporter: $("#nr-reporter").value.trim() || "dashboard",
+    };
+    if (!body.title || !body.description) { toast("Title and description are required", true); return; }
+    try {
+      const res = await api("/reports", { method: "POST", body: JSON.stringify(body) });
+      const warn = (res.warnings || []).length ? ` (${res.warnings.length} warnings)` : "";
+      toast(`Report created${warn}`);
+      closeModal();
+      refresh();
+    } catch (e) { toast(e.message, true); }
+  });
+}
+
+// Projects list — name, repo, and which LLMs its analyses will use, in tier
+// colors. Everything the API supports without curl: create, edit, clone.
+function showProjects() {
+  const rows = projectsCache.map(p => {
+    const fix = p.fix_llm_provider || p.fix_llm_model
+      ? `${esc(p.fix_llm_provider || "?")} · ${esc(p.fix_llm_model || "?")}`
+      : "global default";
+    return `<div class="proj-row">
+      <span class="name">${esc(p.name)}</span>
+      <span class="chip tier-local" title="local stages (triage + localization)"><span class="led local"></span>${esc(p.llm_provider)} · ${esc(p.llm_model)}</span>
+      <span class="chip tier-cloud" title="Stage 4 fix proposals (paid)"><span class="led cloud"></span>fix: ${fix}</span>
+      <span class="spacer"></span>
+      <button data-edit="${esc(p.id)}">Edit</button>
+      <button data-clone="${esc(p.id)}" title="Clone/refresh the repo so localization can run">Clone repo</button>
+      <span class="repo">${esc(p.repo_url)}</span>
+    </div>`;
+  }).join("") || `<p class="kv">No projects yet.</p>`;
+  openModal(`
+    <h2>Projects <button class="close" id="modal-close">✕</button></h2>
+    ${rows}
+    <div class="form-actions"><button id="proj-new" class="tier-local">+ New project</button></div>`);
+  $("#proj-new").addEventListener("click", () => showProjectForm(null));
+  $("#modal").querySelectorAll("[data-edit]").forEach(b =>
+    b.addEventListener("click", () => {
+      const p = projectsCache.find(x => x.id === b.dataset.edit);
+      if (p) showProjectForm(p);
+    }));
+  $("#modal").querySelectorAll("[data-clone]").forEach(b =>
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      b.textContent = "Cloning…";
+      toast("Cloning repo — this can take a minute…");
+      try {
+        await api(`/projects/${b.dataset.clone}/clone`, { method: "POST" });
+        toast("Repo cloned");
+      } catch (e) { toast(e.message, true); }
+      b.disabled = false;
+      b.textContent = "Clone repo";
+      refresh();
+    }));
+}
+
+function showProjectForm(p) {
+  const isNew = !p;
+  openModal(`
+    <h2>${isNew ? "New project" : `Edit — ${esc(p.name)}`}
+      <button class="close" id="modal-close">✕</button></h2>
+    <div class="form-grid">
+      <label>name</label><input id="pf-name" value="${esc(p?.name || "")}">
+      <label>repo url</label><input id="pf-repo" value="${esc(p?.repo_url || "")}" placeholder="https://github.com/owner/repo">
+      <label>branch</label><input id="pf-branch" value="${esc(p?.default_branch || "main")}">
+    </div>
+    <fieldset class="tier-box local">
+      <legend>● Local LLM — triage + localization (free)</legend>
+      <div class="form-grid">
+        <label>provider</label><input id="pf-lprov" value="${esc(p?.llm_provider || "ollama")}">
+        <label>model</label><input id="pf-lmodel" value="${esc(p?.llm_model || "qwen2.5-coder:7b")}">
+      </div>
+    </fieldset>
+    <fieldset class="tier-box cloud">
+      <legend>● Cloud fix LLM — Stage 4 proposals ($)</legend>
+      <div class="form-grid">
+        <label>provider</label><input id="pf-fprov" value="${esc(p?.fix_llm_provider || "")}" placeholder="empty = global default">
+        <label>model</label><input id="pf-fmodel" value="${esc(p?.fix_llm_model || "")}" placeholder="empty = global default">
+      </div>
+    </fieldset>
+    <div class="form-actions">
+      <button id="pf-back">Back</button>
+      <button id="pf-save" class="tier-local">${isNew ? "Create project" : "Save changes"}</button>
+    </div>`);
+  $("#pf-back").addEventListener("click", showProjects);
+  $("#pf-save").addEventListener("click", async () => {
+    const name = $("#pf-name").value.trim();
+    const repo = $("#pf-repo").value.trim();
+    if (!name || !repo) { toast("Name and repo url are required", true); return; }
+    const body = {
+      name,
+      repo_url: repo,
+      default_branch: $("#pf-branch").value.trim() || "main",
+      llm_provider: $("#pf-lprov").value.trim() || "ollama",
+      llm_model: $("#pf-lmodel").value.trim() || "qwen2.5-coder:7b",
+      // Explicit null clears the override → global fix settings (§5.3).
+      fix_llm_provider: $("#pf-fprov").value.trim() || null,
+      fix_llm_model: $("#pf-fmodel").value.trim() || null,
+    };
+    try {
+      if (isNew) await api("/projects", { method: "POST", body: JSON.stringify(body) });
+      else await api(`/projects/${p.id}`, { method: "PATCH", body: JSON.stringify(body) });
+      toast(isNew ? "Project created" : "Project saved");
+      await refresh();
+      showProjects();
+    } catch (e) { toast(e.message, true); }
+  });
+}
+
 let toastTimer = null;
 function toast(msg, isErr = false) {
   const t = $("#toast");
@@ -508,8 +734,45 @@ $("#theme-toggle").addEventListener("click", () => {
   else delete root.dataset.theme;
   try { localStorage.setItem("bugalizer_theme", next); } catch (e) { /* fine */ }
 });
+$("#btn-new-report").addEventListener("click", showNewReport);
+$("#btn-projects").addEventListener("click", showProjects);
+
+// Filter bar (§5b.3)
+let projOptionsKey = "";
+function syncProjectFilter() {
+  const key = projectsCache.map(p => p.id).join(",");
+  if (key === projOptionsKey) return;   // don't rebuild under an open dropdown
+  projOptionsKey = key;
+  const sel = $("#f-project");
+  const cur = sel.value;
+  sel.innerHTML = `<option value="">all projects</option>` + projectOptions();
+  sel.value = cur;
+}
+function filtersChanged() {
+  $("#f-clear").classList.toggle("hidden", !filtersActive());
+  $("#f-attn").classList.toggle("on", filters.attn);
+  renderBoard(lastReports, lastCounts);
+}
+$("#f-project").addEventListener("change", ev => { filters.project = ev.target.value; filtersChanged(); });
+$("#f-severity").addEventListener("change", ev => { filters.severity = ev.target.value; filtersChanged(); });
+$("#f-search").addEventListener("input", ev => { filters.q = ev.target.value.trim(); filtersChanged(); });
+$("#f-attn").addEventListener("click", () => { filters.attn = !filters.attn; filtersChanged(); });
+$("#f-clear").addEventListener("click", () => {
+  filters.project = filters.severity = filters.q = "";
+  filters.attn = false;
+  $("#f-project").value = "";
+  $("#f-severity").value = "";
+  $("#f-search").value = "";
+  filtersChanged();
+});
+
 $("#overlay").addEventListener("click", closeDetail);
-document.addEventListener("keydown", ev => { if (ev.key === "Escape") closeDetail(); });
+$("#modal-wrap").addEventListener("click", ev => { if (ev.target.id === "modal-wrap") closeModal(); });
+document.addEventListener("keydown", ev => {
+  if (ev.key !== "Escape") return;
+  if (modalOpen()) closeModal();
+  else closeDetail();
+});
 
 refresh();
 setInterval(refresh, POLL_MS);

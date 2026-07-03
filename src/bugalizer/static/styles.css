@@ -116,6 +116,19 @@ header h1 { font-size: 16px; margin: 0; letter-spacing: -0.01em; }
 .led.cloud { background: var(--violet); }
 .led.steel { background: var(--steel); }
 
+/* Health strip — database / ollama / worker LEDs from /health (§5b.3).
+   An Ollama outage on the unattended box must be visible within one poll. */
+#health-strip { display: inline-flex; gap: 9px; align-items: center; }
+.health-item {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--text-muted);
+}
+.health-item .led.up { background: var(--green); }
+.health-item .led.down { background: var(--red); }
+.health-item .led.off { background: var(--text-muted); opacity: 0.5; }
+
 #usage { color: var(--text-muted); font-size: 12px; margin-left: auto; }
 #usage b { color: var(--text); }
 #theme-toggle {
@@ -133,6 +146,22 @@ header h1 { font-size: 16px; margin: 0; letter-spacing: -0.01em; }
   border-bottom: 1px solid var(--red); color: var(--text); font-size: 13px;
 }
 #banner.show { display: block; }
+
+/* Filter bar (§5b.3) — client-side, board only */
+#filters {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding: 10px 18px 0;
+}
+#filters select, #filters input {
+  background: var(--input-bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--radius); padding: 5px 8px; font-size: 12.5px;
+}
+#filters input { width: 220px; }
+#filters button {
+  font-size: 12px; padding: 5px 10px; color: var(--text-muted);
+}
+#filters button.on { border-color: var(--yellow); color: var(--yellow); background: var(--yellow-dim); }
+.hidden { display: none !important; }
 
 /* ── Board ── */
 #board {
@@ -293,6 +322,64 @@ select {
   background: var(--input-bg); border: 1px solid var(--border); color: var(--text);
   border-radius: var(--radius); padding: 6px 8px; font-size: 13px;
 }
+
+/* Terminal column collapse (§5b.3) */
+.col h2 .toggle {
+  margin-left: auto; cursor: pointer; user-select: none; color: var(--text-muted);
+}
+.col h2 .toggle:hover { color: var(--text); }
+.show-all {
+  font-size: 11.5px; padding: 5px 10px; color: var(--text-muted); align-self: center;
+}
+
+/* Modals (§5b.4: new report + project management) */
+#modal-wrap {
+  display: none; position: fixed; inset: 0; z-index: 12; background: rgba(0,0,0,.55);
+  align-items: flex-start; justify-content: center; overflow-y: auto; padding: 6vh 16px;
+}
+#modal-wrap.show { display: flex; }
+#modal {
+  background: var(--surface); border: 1px solid var(--line-bright);
+  border-radius: var(--radius); box-shadow: 8px 8px 0 var(--block);
+  width: min(640px, 95vw); padding: 18px;
+}
+#modal h2 { margin: 0 0 12px; font-size: 15px; }
+#modal h2 .close { float: right; }
+.form-grid { display: grid; grid-template-columns: 130px 1fr; gap: 9px 12px; align-items: center; }
+.form-grid label {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.form-grid input, .form-grid select, .form-grid textarea {
+  background: var(--input-bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--radius); padding: 6px 8px; font-size: 13px; width: 100%;
+  font-family: inherit;
+}
+.form-grid textarea { min-height: 90px; resize: vertical; }
+.form-actions { display: flex; gap: 8px; margin-top: 14px; justify-content: flex-end; }
+/* Tier-colored fieldsets: the settings themselves say which tier they steer */
+fieldset.tier-box {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  margin: 14px 0 0; padding: 10px 12px 12px;
+}
+fieldset.tier-box.local { border-color: var(--emerald); background: var(--emerald-dim); }
+fieldset.tier-box.cloud { border-color: var(--violet); background: var(--violet-dim); }
+fieldset.tier-box legend {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 0 6px;
+}
+fieldset.tier-box.local legend { color: var(--emerald); }
+fieldset.tier-box.cloud legend { color: var(--violet); }
+.proj-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg); padding: 9px 12px; margin-bottom: 8px;
+}
+.proj-row .name { font-weight: 600; }
+.proj-row .repo { color: var(--text-muted); font-size: 12px; word-break: break-all; }
+.proj-row .spacer { margin-left: auto; }
 
 #toast {
   position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);

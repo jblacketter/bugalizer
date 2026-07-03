@@ -17,21 +17,35 @@ try {
 <header>
   <h1>🐛 Bugalizer</h1>
   <span id="poll-dot"></span><span id="poll-info">connecting…</span>
+  <span id="health-strip" title="service health"></span>
   <span id="tier-legend" title="Every analysis is labeled with the tier that ran it">
     <span class="legend-item"><span class="led local"></span>Local <em>free</em></span>
     <span class="legend-item"><span class="led cloud"></span>Cloud <em>$ API</em></span>
   </span>
   <span id="usage"></span>
+  <button id="btn-new-report">+ New report</button>
+  <button id="btn-projects">Projects</button>
   <button id="theme-toggle" title="Toggle Slate / Mist theme">◐ theme</button>
   <span id="key-box">
     <input id="api-key" type="password" placeholder="API key (X-API-Key)" autocomplete="off">
   </span>
 </header>
 <div id="banner"></div>
+<div id="filters">
+  <select id="f-project"><option value="">all projects</option></select>
+  <select id="f-severity">
+    <option value="">all severities</option>
+    <option>critical</option><option>high</option><option>medium</option><option>low</option>
+  </select>
+  <input id="f-search" type="search" placeholder="filter by title…">
+  <button id="f-attn" title="Only reports waiting on human input">? needs input</button>
+  <button id="f-clear" class="hidden">clear filters</button>
+</div>
 <main id="board"></main>
 
 <div id="overlay"></div>
 <aside id="detail"></aside>
+<div id="modal-wrap"><div id="modal"></div></div>
 <div id="toast"></div>
 
 <script src="/static/app.js"></script>
