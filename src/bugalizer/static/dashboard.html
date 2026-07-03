@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bugalizer — Queue</title>
+<style>
+  :root {
+    --bg: #10141a; --panel: #181e27; --card: #212a36; --border: #2e3947;
+    --text: #d7dee8; --dim: #8494a7; --accent: #4da3ff;
+    --ok: #3fb96b; --warn: #e0a83a; --err: #e05f5f;
+    --sev-critical: #e05f5f; --sev-high: #e0813a; --sev-medium: #e0c23a; --sev-low: #6fa7d8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 10px 18px; background: var(--panel); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 17px; margin: 0; }
+  #poll-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); display: inline-block; }
+  #poll-dot.ok { background: var(--ok); } #poll-dot.err { background: var(--err); }
+  #poll-info { color: var(--dim); font-size: 12px; }
+  #usage { color: var(--dim); font-size: 12px; margin-left: auto; }
+  #usage b { color: var(--text); }
+  #key-box input {
+    background: var(--card); border: 1px solid var(--border); color: var(--text);
+    border-radius: 5px; padding: 5px 8px; width: 210px; font-size: 12px;
+  }
+  #banner {
+    display: none; padding: 8px 18px; background: #4a2f2f; color: #f0c0c0; font-size: 13px;
+  }
+  #banner.show { display: block; }
+  #board {
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px;
+    padding: 14px 18px; align-items: start;
+  }
+  .col { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; min-height: 120px; }
+  .col h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim);
+    margin: 0; padding: 9px 12px; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between;
+  }
+  .col h2 .count { color: var(--text); }
+  .cards { padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; cursor: pointer;
+  }
+  .card:hover { border-color: var(--accent); }
+  .card .title { font-size: 13px; margin-bottom: 5px; word-break: break-word; }
+  .badges { display: flex; gap: 5px; flex-wrap: wrap; }
+  .badge {
+    font-size: 10px; padding: 1px 7px; border-radius: 9px;
+    background: var(--panel); color: var(--dim); border: 1px solid var(--border);
+  }
+  .badge.sev { color: #10141a; border: none; font-weight: 600; }
+  .badge.fail { background: #4a2f2f; color: #f0c0c0; border-color: #6a4040; }
+  .badge.mode { color: var(--warn); border-color: var(--warn); }
+  /* Detail drawer */
+  #overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 10;
+  }
+  #overlay.show { display: block; }
+  #detail {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(680px, 95vw);
+    background: var(--panel); border-left: 1px solid var(--border);
+    padding: 18px; overflow-y: auto; z-index: 11; display: none;
+  }
+  #detail.show { display: block; }
+  #detail h2 { margin: 0 0 4px; font-size: 16px; }
+  #detail .meta { color: var(--dim); font-size: 12px; margin-bottom: 12px; }
+  #detail section { margin: 14px 0; }
+  #detail section h3 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--dim); margin: 0 0 6px;
+  }
+  #detail pre {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px; overflow-x: auto; font-size: 12px; white-space: pre-wrap;
+  }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+  button {
+    background: var(--card); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 7px 13px; font-size: 13px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: #1d4066; border-color: #2b5a8c; }
+  button.danger-confirm { background: #5c3b1e; border-color: var(--warn); }
+  select {
+    background: var(--card); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 6px 8px; font-size: 13px;
+  }
+  #toast {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 16px; font-size: 13px; display: none; z-index: 20; max-width: 80vw;
+  }
+  #toast.show { display: block; }
+  #toast.err { border-color: var(--err); }
+  #close-detail { float: right; }
+  .kv { color: var(--dim); } .kv b { color: var(--text); font-weight: 500; }
+  @media (max-width: 1100px) { #board { grid-template-columns: repeat(2, 1fr); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>🐛 Bugalizer</h1>
+  <span id="poll-dot"></span><span id="poll-info">connecting…</span>
+  <span id="usage"></span>
+  <span id="key-box">
+    <input id="api-key" type="password" placeholder="API key (X-API-Key)" autocomplete="off">
+  </span>
+</header>
+<div id="banner"></div>
+<main id="board"></main>
+
+<div id="overlay"></div>
+<aside id="detail"></aside>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = (s, el=document) => el.querySelector(s);
+const POLL_MS = 5000;
+
+// Column layout: plan §5.4 — submitted → triaged → analyzing → fix_proposed → terminal.
+const COLUMNS = [
+  { key: "submitted",    label: "Submitted",    statuses: ["submitted", "validating"] },
+  { key: "triaged",      label: "Triaged",      statuses: ["triaged", "clarification_needed", "deferred"] },
+  { key: "analyzing",    label: "Analyzing",    statuses: ["analyzing", "fix_proposing"] },
+  { key: "fix_proposed", label: "Fix proposed", statuses: ["fix_proposed", "fix_approved", "fix_committed", "verified"] },
+  { key: "terminal",     label: "Terminal",     statuses: ["closed", "rejected", "duplicate"] },
+];
+
+let apiKey = localStorage.getItem("bugalizer_api_key") || "";
+let projects = {};          // id -> name
+let openReportId = null;    // detail drawer state
+let cloudArmed = false;     // two-click confirm for the paid button
+
+class ApiError extends Error {
+  constructor(status, detail) { super(detail); this.status = status; }
+}
+
+async function api(path, opts = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) headers["X-API-Key"] = apiKey;
+  const res = await fetch("/api/v1" + path, { ...opts, headers });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (e) { /* not JSON */ }
+    throw new ApiError(res.status, detail);
+  }
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// Board rendering
+// ---------------------------------------------------------------------------
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function age(iso) {
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 90) return Math.max(1, Math.round(s)) + "s";
+  if (s < 5400) return Math.round(s / 60) + "m";
+  if (s < 129600) return Math.round(s / 3600) + "h";
+  return Math.round(s / 86400) + "d";
+}
+
+function cardHtml(r) {
+  const badges = [
+    `<span class="badge sev" style="background:var(--sev-${esc(r.severity)},var(--dim))">${esc(r.severity)}</span>`,
+    `<span class="badge">${esc(projects[r.project_id] || r.project_id)}</span>`,
+    `<span class="badge">${age(r.created_at)}</span>`,
+  ];
+  if (r.analysis_mode && r.analysis_mode !== "auto")
+    badges.push(`<span class="badge mode">${esc(r.analysis_mode)}</span>`);
+  if (r.failed_stage)
+    badges.push(`<span class="badge fail" title="${esc(r.last_error)}">⚠ ${esc(r.failed_stage)} failed</span>`);
+  const nonDefault = !COLUMNS.some(c => c.statuses[0] === r.status);
+  if (nonDefault) badges.push(`<span class="badge">${esc(r.status)}</span>`);
+  return `<div class="card" data-id="${esc(r.id)}">
+    <div class="title">${esc(r.title)}</div>
+    <div class="badges">${badges.join("")}</div>
+  </div>`;
+}
+
+function renderBoard(reports, counts) {
+  const board = $("#board");
+  board.innerHTML = COLUMNS.map(col => {
+    const rows = reports.filter(r => col.statuses.includes(r.status));
+    const count = col.statuses.reduce((n, s) => n + (counts[s] || 0), 0);
+    return `<div class="col">
+      <h2>${col.label} <span class="count">${count}</span></h2>
+      <div class="cards">${rows.map(cardHtml).join("") || ""}</div>
+    </div>`;
+  }).join("");
+  board.querySelectorAll(".card").forEach(el =>
+    el.addEventListener("click", () => openDetail(el.dataset.id)));
+}
+
+function renderUsage(u) {
+  const tokens = (u.total_prompt_tokens + u.total_completion_tokens).toLocaleString();
+  const cost = u.total_estimated_cost_usd ? ` · $${u.total_estimated_cost_usd.toFixed(4)}` : "";
+  const per = Object.entries(u.by_provider)
+    .map(([k, v]) => `${k}: ${(v.prompt_tokens + v.completion_tokens).toLocaleString()}`)
+    .join("  |  ");
+  $("#usage").innerHTML = `tokens <b>${tokens}</b>${cost}`;
+  $("#usage").title = per || "no usage yet";
+}
+
+// ---------------------------------------------------------------------------
+// Poll loop
+// ---------------------------------------------------------------------------
+
+async function refresh() {
+  try {
+    const [queue, reportsResp, projectsResp, usage] = await Promise.all([
+      api("/queue"),
+      api("/reports?limit=200"),
+      api("/projects"),
+      api("/usage"),
+    ]);
+    projects = Object.fromEntries(projectsResp.projects.map(p => [p.id, p.name]));
+    renderBoard(reportsResp.reports, queue.by_status);
+    renderUsage(usage);
+    setPollState(true, `${queue.total} reports · updated ${new Date().toLocaleTimeString()}`);
+    hideBanner();
+    if (openReportId) refreshDetail(openReportId);  // keep the drawer live
+  } catch (e) {
+    setPollState(false, "poll failed");
+    if (e.status === 401 || e.status === 403) {
+      showBanner("API key required or invalid — enter it in the top-right box.");
+    } else {
+      showBanner("Cannot reach the Bugalizer API: " + esc(e.message));
+    }
+  }
+}
+
+function setPollState(ok, text) {
+  $("#poll-dot").className = ok ? "ok" : "err";
+  $("#poll-info").textContent = text;
+}
+function showBanner(msg) { const b = $("#banner"); b.innerHTML = msg; b.classList.add("show"); }
+function hideBanner() { $("#banner").classList.remove("show"); }
+
+// ---------------------------------------------------------------------------
+// Detail drawer
+// ---------------------------------------------------------------------------
+
+async function openDetail(id) {
+  openReportId = id;
+  cloudArmed = false;
+  $("#overlay").classList.add("show");
+  $("#detail").classList.add("show");
+  $("#detail").innerHTML = `<p class="kv">Loading…</p>`;
+  await refreshDetail(id);
+}
+
+function closeDetail() {
+  openReportId = null;
+  $("#overlay").classList.remove("show");
+  $("#detail").classList.remove("show");
+}
+
+async function refreshDetail(id) {
+  let report, analyses, fixes, localization = null;
+  try {
+    [report, analyses, fixes] = await Promise.all([
+      api(`/reports/${id}`),
+      api(`/reports/${id}/analyses`),
+      api(`/reports/${id}/fix_proposals`),
+    ]);
+    try { localization = await api(`/reports/${id}/localization`); } catch (e) { /* none yet */ }
+  } catch (e) {
+    $("#detail").innerHTML = `<p class="kv">Failed to load report: ${esc(e.message)}</p>`;
+    return;
+  }
+  renderDetail(report, analyses.analyses, localization, fixes.fix_proposals);
+}
+
+function triageSection(analyses) {
+  const t = analyses.find(a => a.phase === "triage" && a.status === "completed");
+  if (!t || !t.result) return `<p class="kv">No triage result yet.</p>`;
+  return `<pre>${esc(JSON.stringify(t.result, null, 2))}</pre>`;
+}
+
+function localizationSection(loc) {
+  if (!loc) return `<p class="kv">No localization yet.</p>`;
+  const cands = (loc.localizations.length ? loc.localizations : loc.candidate_files)
+    .map(c => `<li><b>${esc(c.file || c.path)}</b>${c.function ? " · " + esc(c.function) : ""}` +
+              `${c.reason ? ` <span class="kv">— ${esc(c.reason)}</span>` : ""}</li>`)
+    .join("");
+  return `<p class="kv">sha <b>${esc((loc.repo_sha || "").slice(0, 10))}</b>` +
+         ` · confidence <b>${loc.confidence}</b>` +
+         (loc.root_cause_hypothesis ? ` · <b>${esc(loc.root_cause_hypothesis)}</b>` : "") +
+         `</p><ul>${cands || "<li class='kv'>no candidates</li>"}</ul>`;
+}
+
+function fixSection(fixes) {
+  if (!fixes.length) return `<p class="kv">No fix proposals yet.</p>`;
+  return fixes.map(f => `
+    <p class="kv">confidence <b>${f.confidence}</b> · files <b>${esc((f.files_changed || []).join(", "))}</b>
+       · ${esc(f.created_at)}</p>
+    <p>${esc(f.root_cause)}</p>
+    <p class="kv">${esc(f.explanation)}</p>
+    <pre>${esc(f.diff)}</pre>`).join("<hr>");
+}
+
+function renderDetail(r, analyses, loc, fixes) {
+  const failure = r.failed_stage
+    ? `<section><h3>Failure</h3><p class="badge fail">⚠ ${esc(r.failed_stage)}</p>
+       <pre>${esc(r.last_error || "")}</pre></section>` : "";
+  $("#detail").innerHTML = `
+    <button id="close-detail">✕</button>
+    <h2>${esc(r.title)}</h2>
+    <div class="meta">
+      <b>${esc(r.status)}</b> · ${esc(r.severity)} · ${esc(projects[r.project_id] || r.project_id)}
+      · by ${esc(r.reporter)} · ${age(r.created_at)} old · id ${esc(r.id)}
+    </div>
+    <div class="actions">
+      <button id="act-local" class="primary">Analyze (local)</button>
+      <button id="act-cloud">Analyze (cloud)</button>
+      <button id="act-retry">Retry</button>
+      <label class="kv">mode
+        <select id="mode-select">
+          ${["auto", "local_only", "hold"].map(m =>
+            `<option value="${m}" ${r.analysis_mode === m ? "selected" : ""}>${m}</option>`).join("")}
+        </select>
+      </label>
+    </div>
+    ${failure}
+    <section><h3>Description</h3><pre>${esc(r.description)}</pre></section>
+    <section><h3>Triage</h3>${triageSection(analyses)}</section>
+    <section><h3>Localization</h3>${localizationSection(loc)}</section>
+    <section><h3>Fix proposals</h3>${fixSection(fixes)}</section>
+  `;
+  $("#close-detail").addEventListener("click", closeDetail);
+  $("#act-local").addEventListener("click", () => doAnalyze(r.id, "local"));
+  $("#act-cloud").addEventListener("click", ev => confirmCloud(ev.target, r.id));
+  $("#act-retry").addEventListener("click", () => doRetry(r.id));
+  $("#mode-select").addEventListener("change", ev => doSetMode(r.id, ev.target.value));
+}
+
+// Two-click confirm for the paid cloud call (no blocking dialogs).
+function confirmCloud(btn, id) {
+  if (!cloudArmed) {
+    cloudArmed = true;
+    btn.textContent = "Confirm cloud call ($)";
+    btn.classList.add("danger-confirm");
+    setTimeout(() => {
+      cloudArmed = false;
+      btn.textContent = "Analyze (cloud)";
+      btn.classList.remove("danger-confirm");
+    }, 4000);
+    return;
+  }
+  cloudArmed = false;
+  doAnalyze(id, "cloud");
+}
+
+async function doAnalyze(id, tier) {
+  try {
+    const res = await api(`/reports/${id}/analyze`, {
+      method: "POST", body: JSON.stringify({ tier }),
+    });
+    toast(res.detail || `${tier} analysis dispatched`);
+    await refreshDetail(id);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function doRetry(id) {
+  try {
+    const res = await api(`/queue/${id}/retry`, { method: "POST" });
+    toast(res.message || "retry counters reset");
+    await refreshDetail(id);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function doSetMode(id, mode) {
+  try {
+    await api(`/reports/${id}/analysis_mode`, {
+      method: "PATCH", body: JSON.stringify({ analysis_mode: mode }),
+    });
+    toast(`analysis_mode → ${mode}`);
+  } catch (e) { toast(e.message, true); }
+}
+
+let toastTimer = null;
+function toast(msg, isErr = false) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.className = "show" + (isErr ? " err" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = ""; }, 4000);
+}
+
+// ---------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------
+
+$("#api-key").value = apiKey;
+$("#api-key").addEventListener("change", ev => {
+  apiKey = ev.target.value.trim();
+  localStorage.setItem("bugalizer_api_key", apiKey);
+  refresh();
+});
+$("#overlay").addEventListener("click", closeDetail);
+document.addEventListener("keydown", ev => { if (ev.key === "Escape") closeDetail(); });
+
+refresh();
+setInterval(refresh, POLL_MS);
+</script>
+</body>
+</html>

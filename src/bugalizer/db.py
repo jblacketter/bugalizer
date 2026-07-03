@@ -358,24 +358,59 @@ def report_get(report_id: str) -> Optional[dict[str, Any]]:
     return _report_row_to_dict(row) if row else None
 
 
+def _report_filter_clause(
+    project_id: Optional[str],
+    status: Optional[str],
+    include_deleted: bool,
+) -> tuple[str, list[Any]]:
+    """Shared WHERE clause for report_list / report_count."""
+    clause = " WHERE 1=1"
+    params: list[Any] = []
+    if not include_deleted:
+        clause += " AND (resolution_reason IS NULL OR resolution_reason != 'deleted')"
+    if project_id:
+        clause += " AND project_id = ?"
+        params.append(project_id)
+    if status:
+        clause += " AND status = ?"
+        params.append(status)
+    return clause, params
+
+
 def report_list(
     project_id: Optional[str] = None,
     status: Optional[str] = None,
     include_deleted: bool = False,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    order: str = "desc",
 ) -> list[dict[str, Any]]:
+    """List reports, newest first by default.
+
+    `limit`/`offset` paginate at the SQL level (§5.4 dashboard); `order`
+    is 'desc' (default) or 'asc' on created_at — anything else falls back
+    to 'desc' (never interpolated raw into SQL).
+    """
     conn = _get_conn()
-    query = "SELECT * FROM bug_reports WHERE 1=1"
-    params: list[Any] = []
-    if not include_deleted:
-        query += " AND (resolution_reason IS NULL OR resolution_reason != 'deleted')"
-    if project_id:
-        query += " AND project_id = ?"
-        params.append(project_id)
-    if status:
-        query += " AND status = ?"
-        params.append(status)
-    query += " ORDER BY created_at DESC"
+    clause, params = _report_filter_clause(project_id, status, include_deleted)
+    direction = "ASC" if order == "asc" else "DESC"
+    query = f"SELECT * FROM bug_reports{clause} ORDER BY created_at {direction}"
+    if limit is not None:
+        query += " LIMIT ? OFFSET ?"
+        params += [limit, offset]
     return [_report_row_to_dict(r) for r in conn.execute(query, params).fetchall()]
+
+
+def report_count(
+    project_id: Optional[str] = None,
+    status: Optional[str] = None,
+    include_deleted: bool = False,
+) -> int:
+    """Count reports matching the same filters as report_list (pre-pagination)."""
+    conn = _get_conn()
+    clause, params = _report_filter_clause(project_id, status, include_deleted)
+    row = conn.execute(f"SELECT COUNT(*) AS cnt FROM bug_reports{clause}", params).fetchone()
+    return int(row["cnt"])
 
 
 @retry_on_locked

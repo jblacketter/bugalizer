@@ -27,7 +27,7 @@ Client --> FastAPI --> SQLite (WAL) <-- Queue worker (asyncio poll loop)
 
 | Module | Responsibility |
 |--------|----------------|
-| `main.py` | FastAPI app, lifespan (starts/stops queue worker), CORS, `/health` |
+| `main.py` | FastAPI app, lifespan (starts/stops queue worker), CORS, `/health`, serves the dashboard at `/` |
 | `config.py` | Pydantic BaseSettings, `BUGALIZER_*` env prefix, `QA_LLM_*` fallback layer |
 | `auth.py` | `X-API-Key` header auth; disabled when `BUGALIZER_API_KEYS` is empty |
 | `models.py` | Pydantic models, 13-state workflow, `CURRENT_PHASE_TARGETS` phase gating |
@@ -37,6 +37,7 @@ Client --> FastAPI --> SQLite (WAL) <-- Queue worker (asyncio poll loop)
 | `pipeline/` | Stage implementations + `orchestrator.py` coordinator with atomic claims |
 | `git_ops/repo.py` | Clone/pull/SHA/file listing via subprocess |
 | `queue/worker.py` | Background asyncio poll loop dispatching all four stages |
+| `static/dashboard.html` | Queue dashboard (Phase 5 §5.4): one self-contained page, vanilla JS, 5s fetch-polling; API key in localStorage sent as `X-API-Key`; analyze/retry actions |
 
 ## Pipeline stages
 

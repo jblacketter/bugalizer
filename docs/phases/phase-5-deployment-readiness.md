@@ -175,19 +175,25 @@ resolves to `anthropic`/`claude-sonnet-4-6`, and a project `fix_llm_*` override 
 Deliberately small — no build tooling, no framework. One static HTML page + vanilla JS (or htmx),
 served by FastAPI at `/`, polling JSON endpoints every few seconds.
 
-- [ ] `GET /api/v1/reports` gains the list/filter shape the dashboard needs (status filter,
+- [x] `GET /api/v1/reports` gains the list/filter shape the dashboard needs (status filter,
       sort by created_at, include `failed_stage`/`last_error`, pagination) — extend, don't
       duplicate, the existing endpoint in `api/reports.py`.
-- [ ] Dashboard page:
+      — Added `limit` (1–500) / `offset` / `order` (asc|desc) query params; `total` is the
+      pre-pagination count; every row carries `failed_stage`/`last_error`. New read-only
+      `GET /reports/{id}/analyses` feeds the detail view's triage result + failure history.
+- [x] Dashboard page (`src/bugalizer/static/dashboard.html`, served at `/` — one
+      self-contained file, no build tooling, plain fetch-polling every 5s):
       - Queue columns by status (submitted → triaged → analyzing → fix_proposed → terminal),
         with counts from `GET /api/v1/queue`.
-      - Per-report row: title, severity, project, age, retry/error badge.
+      - Per-report row: title, severity, project, age, retry/error badge (+ mode badge when
+        not `auto`).
       - Detail view: triage result, localization candidates, fix proposal diff (from
-        `GET /reports/{id}/fix_proposals`).
-      - Actions: **Analyze (local)**, **Analyze (cloud)** (→ 5.3 endpoint), **Retry** (→ queue
-        retry endpoint).
-      - API-key entry stored in localStorage, sent as `X-API-Key`.
-- [ ] Token-usage summary panel (endpoints already exist in `api/usage.py`).
+        `GET /reports/{id}/fix_proposals`), plus an `analysis_mode` selector (§5.3 PATCH).
+      - Actions: **Analyze (local)**, **Analyze (cloud)** (→ 5.3 endpoint; two-click confirm
+        on the paid button, no blocking dialogs), **Retry** (→ queue retry endpoint).
+      - API-key entry stored in localStorage, sent as `X-API-Key`; 401/403 shows a banner.
+- [x] Token-usage summary panel (endpoints already exist in `api/usage.py`) — header shows
+      total tokens + estimated cost; per-provider breakdown on hover.
 
 **Acceptance:** open `http://<lan-host>:8090/`, watch submitted bugs appear and move through
 states without refreshing the API docs; both analyze buttons work end-to-end.

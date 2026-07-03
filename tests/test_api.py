@@ -239,6 +239,102 @@ def test_list_reports_filter_by_status():
     assert r.json()["total"] == 0
 
 
+def test_list_reports_pagination():
+    """§5.4: limit/offset paginate; total stays the pre-pagination count."""
+    pid = _create_project().json()["id"]
+    for i in range(5):
+        _create_report(pid, title=f"Bug {i}")
+
+    r = client.get("/api/v1/reports?limit=2")
+    body = r.json()
+    assert len(body["reports"]) == 2
+    assert body["total"] == 5
+
+    r = client.get("/api/v1/reports?limit=2&offset=4")
+    body = r.json()
+    assert len(body["reports"]) == 1
+    assert body["total"] == 5
+
+    # Bounds enforced.
+    assert client.get("/api/v1/reports?limit=0").status_code == 422
+    assert client.get("/api/v1/reports?limit=501").status_code == 422
+    assert client.get("/api/v1/reports?offset=-1").status_code == 422
+
+
+def test_list_reports_order():
+    """§5.4: order=asc|desc on created_at; invalid value is a 422."""
+    pid = _create_project().json()["id"]
+    first = _create_report(pid, title="First").json()["id"]
+    last = _create_report(pid, title="Last").json()["id"]
+
+    r = client.get("/api/v1/reports?order=asc")
+    ids = [x["id"] for x in r.json()["reports"]]
+    assert ids.index(first) < ids.index(last)
+
+    r = client.get("/api/v1/reports")  # default desc
+    ids = [x["id"] for x in r.json()["reports"]]
+    assert ids.index(last) < ids.index(first)
+
+    assert client.get("/api/v1/reports?order=sideways").status_code == 422
+
+
+def test_list_reports_includes_failure_info():
+    """§5.4: list rows carry failed_stage/last_error for the error badge."""
+    from bugalizer.db import analysis_create
+
+    pid = _create_project().json()["id"]
+    rid = _create_report(pid).json()["id"]
+    analysis_create(
+        bug_report_id=rid,
+        phase="localization",
+        status="failed",
+        result={"error": "boom", "permanent": False},
+        completed_at="2026-01-01T00:00:00+00:00",
+    )
+
+    rows = client.get("/api/v1/reports").json()["reports"]
+    row = next(x for x in rows if x["id"] == rid)
+    assert row["failed_stage"] == "localization"
+    assert row["last_error"] == "boom"
+
+
+def test_list_report_analyses_endpoint():
+    """§5.4: detail view reads analysis rows (triage result, history)."""
+    from bugalizer.db import analysis_create
+
+    pid = _create_project().json()["id"]
+    rid = _create_report(pid).json()["id"]
+    analysis_create(
+        bug_report_id=rid, phase="triage", status="completed",
+        result={"severity": "high", "summary": "null deref"},
+    )
+
+    r = client.get(f"/api/v1/reports/{rid}/analyses")
+    assert r.status_code == 200
+    rows = r.json()["analyses"]
+    assert len(rows) == 1
+    assert rows[0]["phase"] == "triage"
+    assert rows[0]["result"]["summary"] == "null deref"
+
+    # Phase filter + 404.
+    assert client.get(f"/api/v1/reports/{rid}/analyses?phase=fix").json()["analyses"] == []
+    assert client.get("/api/v1/reports/nope/analyses").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Dashboard (§5.4)
+# ---------------------------------------------------------------------------
+
+def test_dashboard_served_at_root():
+    """GET / serves the self-contained dashboard page, no auth required for
+    the static page itself (its API calls carry the key)."""
+    r = client.get("/")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "Bugalizer" in r.text
+    assert "X-API-Key" in r.text  # the page wires the key header
+
+
 def test_get_report():
     pid = _create_project().json()["id"]
     rid = _create_report(pid).json()["id"]

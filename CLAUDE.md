@@ -6,7 +6,7 @@ AI-powered bug report processing server. Accepts structured bug reports via REST
 ## Quick Start
 ```bash
 uv sync --dev
-uv run pytest                # 185 tests, all should pass
+uv run pytest                # 190 tests, all should pass
 
 # Run the server
 BUGALIZER_DB_PATH=bugalizer.db uv run uvicorn bugalizer.main:app --port 8090
@@ -16,8 +16,10 @@ BUGALIZER_DB_PATH=bugalizer.db uv run uvicorn bugalizer.main:app --port 8090
 ## Project Structure
 ```
 src/bugalizer/
-  main.py          # FastAPI app entry point
+  main.py          # FastAPI app entry point (serves dashboard at /)
   config.py        # Pydantic BaseSettings (env: BUGALIZER_*)
+  static/
+    dashboard.html # Self-contained queue dashboard (vanilla JS, fetch-polling)
   auth.py          # API key auth (X-API-Key header)
   models.py        # Pydantic models + 13-state workflow engine
   db.py            # SQLite layer (schema + CRUD + retry_on_locked + migrations)
@@ -62,8 +64,9 @@ tests/
 - **Phase 4 (Fix Proposals): COMPLETE (codex-approved)** — Anthropic-via-litellm stage generates unified-diff fix proposals with prompt caching; `FIX_PROPOSING` transient claim state; SHA-freshness gate before paid calls; `GET /reports/{id}/fix_proposals` endpoint.
 - **Phase 5 (Deployment Readiness + Dashboard): IN PROGRESS** — see `docs/phases/phase-5-deployment-readiness.md`
   - Cycle 1 (5.1 retry gates + 5.2 security defaults): COMPLETE (codex-approved)
-  - Cycle 2 (5.3 per-report `analysis_mode`, `POST /reports/{id}/analyze`, per-project `fix_llm_*` provider split): IMPLEMENTED — awaiting review
-  - Remaining: Cycle 3 (5.4 dashboard), Cycle 4 (5.5 deployment packaging)
+  - Cycle 2 (5.3 per-report `analysis_mode`, `POST /reports/{id}/analyze`, per-project `fix_llm_*` provider split): COMPLETE (codex-approved)
+  - Cycle 3 (5.4 queue dashboard at `/`, reports list pagination, `GET /reports/{id}/analyses`): IMPLEMENTED — awaiting review
+  - Remaining: Cycle 4 (5.5 deployment packaging)
 - Phase 6 (Integrations): NOT STARTED
 
 ## Handoff Workflow

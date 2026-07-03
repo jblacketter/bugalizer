@@ -6,10 +6,12 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from bugalizer import __version__
 from bugalizer.config import settings
@@ -21,6 +23,9 @@ from bugalizer.api.usage import router as usage_router
 from bugalizer.queue.worker import start_worker, stop_worker, worker_alive
 
 logger = logging.getLogger(__name__)
+
+# Static assets shipped inside the package (§5.4 dashboard).
+_STATIC_DIR = Path(__file__).parent / "static"
 
 
 @asynccontextmanager
@@ -86,6 +91,15 @@ def create_app() -> FastAPI:
             allow_methods=["*"],
             allow_headers=["*"],
         )
+
+    @app.get("/", include_in_schema=False)
+    async def dashboard() -> FileResponse:
+        """Serve the queue dashboard (§5.4) — one self-contained static page.
+
+        The page itself needs no auth; every API call it makes carries the
+        X-API-Key the user enters (stored in browser localStorage).
+        """
+        return FileResponse(_STATIC_DIR / "dashboard.html", media_type="text/html")
 
     @app.get("/health/live", tags=["meta"])
     async def liveness() -> dict[str, str]:

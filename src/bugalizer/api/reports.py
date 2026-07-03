@@ -12,6 +12,7 @@ from bugalizer.db import (
     latest_completed_localization,
     project_exists,
     project_get,
+    report_count,
     report_create,
     report_delete,
     report_failure_info,
@@ -122,13 +123,33 @@ def create_report(
 def list_reports(
     project_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
+    limit: Optional[int] = Query(None, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
     _key: str = Depends(require_api_key),
 ) -> BugReportListResponse:
-    """List bug reports, optionally filtered by project_id and/or status."""
-    rows = report_list(project_id=project_id, status=status)
+    """List bug reports, optionally filtered by project_id and/or status.
+
+    §5.4 dashboard shape: `limit`/`offset` paginate (limit ≤ 500; omit limit
+    for the full list), `order` sorts by created_at (`desc` default). `total`
+    is the pre-pagination match count. Each row includes `failed_stage` /
+    `last_error` when the report has an unresolved pipeline failure.
+    """
+    rows = report_list(
+        project_id=project_id, status=status,
+        limit=limit, offset=offset, order=order,
+    )
+    responses = []
+    for r in rows:
+        resp = _row_to_response(r)
+        failure = report_failure_info(r["id"])
+        if failure:
+            resp.failed_stage = failure["failed_stage"]
+            resp.last_error = failure["last_error"]
+        responses.append(resp)
     return BugReportListResponse(
-        reports=[_row_to_response(r) for r in rows],
-        total=len(rows),
+        reports=responses,
+        total=report_count(project_id=project_id, status=status),
     )
 
 
@@ -271,6 +292,23 @@ async def analyze_report(
         detail = "Cloud fix proposal dispatched"
 
     return AnalyzeResponse(id=report_id, tier=body.tier.value, detail=detail)
+
+
+@router.get("/reports/{report_id}/analyses")
+def list_report_analyses(
+    report_id: str,
+    phase: Optional[str] = Query(None),
+    _key: str = Depends(require_api_key),
+) -> dict:
+    """List analysis rows for a report, newest first, optionally by phase.
+
+    Read-only; feeds the dashboard detail view (triage result, failure
+    history). `result` is the deserialized JSON the stage persisted.
+    """
+    row = report_get(report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Bug report not found")
+    return {"analyses": analyses_for_report(report_id, phase=phase)}
 
 
 @router.get("/reports/{report_id}/localization")
