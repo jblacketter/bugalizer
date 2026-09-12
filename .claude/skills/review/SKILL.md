@@ -1,6 +1,6 @@
 # Skill: /review
 
-Pre-submission code review checklist for Bugalizer. Run before `/handoff` to catch common issues.
+Pre-submission code review checklist for Bugalizer. Run this before submitting for review, then read the handoff contract (`tagteam contract`; in Claude Code: `/tagteam:handoff`) and `handoff-state.json`, and act on your turn.
 
 ## Usage
 

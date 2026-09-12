@@ -75,7 +75,10 @@ tests/
 - Phase 6 (Integrations): NOT STARTED
 
 ## Handoff Workflow
-Uses ai-handoff system: claude (lead) ↔ codex (reviewer). Run `/handoff` to check state.
+Uses tagteam: claude (lead) ↔ codex (reviewer). Read `tagteam.yaml` and `handoff-state.json`,
+then follow the handoff contract: `/tagteam:handoff` (Claude Code plugin) or `tagteam contract`.
+See `AGENTS.md` and `docs/workflows.md`. The old vendored `.claude/skills/handoff/` is gone;
+the plugin serves the skill.
 
 ## Dev Environment
 - Python 3.12.11+ with `uv`
@@ -103,4 +106,4 @@ Uses ai-handoff system: claude (lead) ↔ codex (reviewer). Run `/handoff` to ch
 - `/review` — Pre-submission code review checklist
 - `/pii-scan` — PII data flow audit and regulatory compliance check
 - `/security-check` — OWASP-based security audit
-- `/handoff` — AI handoff workflow (claude ↔ codex)
+- `/tagteam:handoff` — AI handoff workflow (claude ↔ codex), served by the tagteam plugin

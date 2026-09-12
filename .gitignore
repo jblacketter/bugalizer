@@ -46,3 +46,6 @@ htmlcov/
 
 # Build artifacts
 *.whl
+
+# Tagteam runtime state (db + write lock, recreated per session)
+.tagteam/
