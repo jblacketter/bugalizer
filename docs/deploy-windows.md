@@ -58,8 +58,14 @@ variables override it.
 2. From the repo directory:
 
    ```powershell
+   $env:GIT_REVISION = (git rev-parse HEAD)
    docker compose up -d --build
    ```
+
+   `GIT_REVISION` stamps the image with the checkout's commit; the service
+   reports it as `revision` on `/health`, which is how the deploy check tells a
+   fresh build from a stale one. Without it the service reports `revision:
+   null` and the check cannot confirm what is running.
 
 What the compose file wires for you:
 
@@ -69,7 +75,9 @@ What the compose file wires for you:
   `repos/`, repo-map `cache/`) — one directory to back up.
 - `restart: unless-stopped` + a container healthcheck against `/health/live`.
 
-Update procedure: `git pull`, then `docker compose up -d --build`.
+Update procedure: `git pull`, then the same two lines as above. A `git pull`
+alone leaves the old image running; the deploy check in §6 reports that as
+STALE.
 
 ## 4. Option B — native service via NSSM (no Docker)
 
@@ -90,6 +98,11 @@ Update procedure: `git pull`, then `docker compose up -d --build`.
    `AppDirectory` matters: the app reads `.env` and resolves the relative
    `bugalizer.db` / `./repos` / `./cache` paths from there. NSSM restarts the
    process if it dies and starts it at boot.
+
+   Update procedure: `git pull`, `uv sync`, then `nssm restart Bugalizer`. The
+   service reads its git revision once at start, so until the restart it keeps
+   reporting the old commit on `/health` and the deploy check in §6 reports
+   STALE.
 
    *Task Scheduler fallback* (no NSSM): create a task triggered **At startup**,
    action `uv.exe` with the same arguments and *Start in* set to the repo
@@ -112,17 +125,32 @@ home LAN.)
 - Dashboard: open `http://<lan-host>:8090/`, paste an API key in the
   top-right box (stored in the browser's localStorage).
 
-Or run all of that in one go from the checkout (deployed commit, both health
-endpoints including `auth_enabled`, Ollama reachability, and whether Docker or
-NSSM is serving):
+Or run all of that in one go from the checkout:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\windows\check-service.ps1
 ```
 
-`auth_enabled: false` means `BUGALIZER_API_KEYS` is empty; fix that before the
-service is reachable from the LAN. The script's output is the post-merge
-acceptance record for a phase.
+It prints, and its output is the post-merge acceptance record for a phase:
+
+- **Revision.** The checkout's `HEAD` and, separately, the `revision` the
+  running service reports on `/health`. The verdict is `VERIFIED` only when
+  the two match. `STALE` means the service runs an older commit (rebuild or
+  restart per §3/§4). `UNKNOWN` means the service reports no revision (an
+  image built without `GIT_REVISION`, or a pre-Phase-7 build); the script then
+  says the deployment is not verified rather than guessing. `-ExpectedRevision
+  <sha>` replaces the git lookup when running from somewhere other than the
+  deployed checkout.
+- **Health.** `/health/live` and `/health`, including the body of a 503 (the
+  service returns its `checks` even when the database check fails, and that is
+  exactly when you want to see them). Transport failures (nothing listening)
+  are reported separately from HTTP failures.
+- **Auth.** `auth_enabled` from `/health`. `false` means `BUGALIZER_API_KEYS`
+  is empty; fix that before the service is reachable from the LAN. A service
+  that omits the field predates Phase 7 and is reported as unknown.
+- **Ollama** reachability and which deploy option (Docker container or NSSM
+  service) is active, with the container's image id and start time or the
+  service's state.
 
 Then run the full end-to-end check: see [`smoke-test.md`](smoke-test.md).
 

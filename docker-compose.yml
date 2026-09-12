@@ -3,7 +3,13 @@
 # through host.docker.internal. See docs/deploy-windows.md.
 services:
   bugalizer:
-    build: .
+    build:
+      context: .
+      args:
+        # Stamp the running build with its git revision (reported by
+        # /health). Set GIT_REVISION in the shell before `up --build`; see
+        # docs/deploy-windows.md §3.
+        GIT_REVISION: "${GIT_REVISION:-}"
     container_name: bugalizer
     ports:
       - "8090:8090"

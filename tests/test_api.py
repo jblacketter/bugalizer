@@ -986,3 +986,46 @@ def test_project_patch_invalid_config_leaves_row_unchanged():
     assert r.status_code == 422
     got = client.get(f"/api/v1/projects/{pid}").json()
     assert got["ingest_config"] == _supabase_config()
+
+
+# --- running revision (deploy check) ----------------------------------------
+
+def test_health_endpoints_report_revision_key():
+    """Both health endpoints carry `revision`: a string when it can be
+    established, else null. The test checkout is a git repo, so it is a sha."""
+    for path in ("/health/live", "/health"):
+        body = client.get(path).json()
+        assert "revision" in body
+        assert body["revision"] is None or (
+            isinstance(body["revision"], str) and len(body["revision"]) >= 7
+        )
+
+
+def test_detect_revision_precedence(tmp_path):
+    from bugalizer.main import detect_revision
+    # Configured value wins, trimmed, and needs no checkout.
+    assert detect_revision("  abc123  ", checkout_root=tmp_path) == "abc123"
+    # No configured value and no checkout: unknown, never a guess.
+    assert detect_revision("", checkout_root=tmp_path) is None
+    # No configured value but a real checkout: git HEAD.
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[1]
+    sha = detect_revision("", checkout_root=repo_root)
+    assert sha is not None and len(sha) == 40
+
+
+def test_runtime_revision_is_pinned_per_process():
+    from bugalizer.config import settings
+    from bugalizer.main import runtime_revision
+    runtime_revision.cache_clear()
+    settings.git_revision = "deployed-sha-1"
+    try:
+        assert runtime_revision() == "deployed-sha-1"
+        assert client.get("/health/live").json()["revision"] == "deployed-sha-1"
+        # A later change (a git pull under a running service) is not picked up
+        # until the process restarts.
+        settings.git_revision = "deployed-sha-2"
+        assert runtime_revision() == "deployed-sha-1"
+    finally:
+        settings.git_revision = ""
+        runtime_revision.cache_clear()
