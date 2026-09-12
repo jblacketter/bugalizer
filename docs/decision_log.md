@@ -6,6 +6,40 @@ This log tracks important decisions made during the project.
 
 ---
 
+## 2026-09-12: Two seams for the Aegis arc (Phase 7 / B0)
+
+**Decision:** (1) The cloud tier accepts a per-request `llm` override (provider, model,
+`api_key`, non-secret `key_ref`) on `POST /reports/{id}/analyze`. The key rides as an argument
+of the in-process background task into `complete()` and is never stored, logged, or returned;
+error text on the fix path is sanitized (`_safe_error_text`) and 422 bodies never echo the
+request. `token_usage` records `key_source` (`request` | `env`) and the caller's `key_ref` so
+spend stays attributable to the Aegis settings row that paid. (2) Projects carry an ingest
+seam: `ingest_source` (`supabase` only for now) plus `ingest_config` holding `{url, table,
+credential_env}`, the env var *name* only, validated as a pair against the merged row on PATCH.
+
+**Context:** Ruled in the Aegis direction record (`~/projects/QA/docs/
+bugalizer-integration-direction-2026-09-12.html`, D2 pull from Supabase, D3 key travels with the
+request). B1 builds the Supabase poller on the ingest seam; A1 sends the override from the Aegis
+Bugs page.
+
+**Alternatives Considered:**
+- Aegis writes the key into a per-project Bugalizer column (D3 option B): doubles the stored-key
+  surface, rejected in the direction record.
+- A secret-name blacklist on `ingest_config`: replaced by a closed schema (`extra="forbid"`,
+  three declared fields) so there is no field a credential could ride in.
+- A binary `key_source` flag only: cannot name which settings row paid; `key_ref` added at
+  review.
+
+**Decided By:** Human (jack) via the direction record; plan approved by codex (plan round 2).
+
+**Phase:** 7 (bugalizer-revive, B0)
+
+**Follow-ups:**
+- B1: poller reads `ingest_config.credential_env` from the host environment at run time.
+- A1: the engine proxy refuses to start when `/health` reports `auth_enabled: false`.
+
+---
+
 ## 2026-07-03: Per-thread SQLite connections (dashboard parallel-poll crash)
 
 **Decision:** `db.py` hands each thread its own SQLite connection for file databases

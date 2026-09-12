@@ -17,7 +17,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional, Sequence
 
 from bugalizer.config import settings
 from bugalizer.db import (
@@ -34,9 +34,31 @@ from bugalizer.db import (
 )
 from bugalizer.llm import client as llm_client
 from bugalizer.llm.prompts import format_fix_proposal_prompt
+from bugalizer.models import LLMOverride
 from bugalizer.pipeline.localizer import read_candidate_files
 
 logger = logging.getLogger(__name__)
+
+# Second safety net for `_safe_error_text`: common API-key shapes. The primary
+# mechanism is exact replacement of the secrets we were actually handed.
+_KEY_SHAPES = re.compile(
+    r"(sk-ant-[A-Za-z0-9_\-]{8,}|sk-[A-Za-z0-9_\-]{8,}|Bearer\s+[A-Za-z0-9._\-]{8,})"
+)
+_REDACTED = "[redacted]"
+
+
+def _safe_error_text(exc: BaseException, secrets: Sequence[str] = ()) -> str:
+    """Error text safe to log and persist: `<Type>: <message>` with every
+    supplied secret (and anything shaped like a key) replaced by [redacted].
+
+    Once a plain key reaches a provider, exception text can contain it, so
+    `str(exc)` must never be written raw on the fix path.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, _REDACTED)
+    return _KEY_SHAPES.sub(_REDACTED, text)
 
 
 class FixProposalError(Exception):
@@ -244,7 +266,9 @@ def _collect_candidate_files(analysis: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-async def propose_fix(report_id: str) -> None:
+async def propose_fix(
+    report_id: str, llm_override: Optional[LLMOverride] = None
+) -> None:
     """Run the fix-proposal stage for a report.
 
     Atomically claims `triaged → fix_proposing`. On success transitions to
@@ -253,7 +277,20 @@ async def propose_fix(report_id: str) -> None:
     without recording a failure. A real failure (LLM/parse/validation) records
     a failed `fix` analysis row — marked transient or permanent — so the retry
     gate in `reports_eligible_for_fix` can cap paid re-dispatch.
+
+    `llm_override` (Phase 7, D3): per-request provider/model/key. Each field
+    present wins over the project/global resolution; the key is unwrapped
+    exactly once here, handed to `complete()`, and otherwise exists only in
+    this frame. Error text on every failure path goes through
+    `_safe_error_text` so the key never reaches a log line or a table.
     """
+    # Secrets to scrub from any error text (empty when no request key).
+    secrets: list[str] = []
+    request_key: Optional[str] = None
+    if llm_override is not None and llm_override.has_key():
+        request_key = llm_override.api_key.get_secret_value()  # type: ignore[union-attr]
+        secrets.append(request_key)
+
     # 1. Atomic claim — exits if another worker already took it.
     async with db_write_lock:
         claimed = try_claim_report(report_id, "triaged", "fix_proposing")
@@ -340,10 +377,17 @@ async def propose_fix(report_id: str) -> None:
         # It never reads the local llm_provider/llm_model pair, so a default
         # `ollama` project still routes fixes to the cloud provider.
         fix_provider, fix_model = llm_client.resolve_fix_llm(project)
+        # Phase 7: request field if present, else the resolution above.
+        if llm_override is not None:
+            if llm_override.provider:
+                fix_provider = llm_override.provider
+            if llm_override.model:
+                fix_model = llm_override.model
         llm_response = await llm_client.complete(
             model=fix_model,
             messages=messages,
             provider=fix_provider,
+            api_key=request_key,
         )
 
         # 4. Parse + validate.
@@ -378,6 +422,8 @@ async def propose_fix(report_id: str) -> None:
                 bug_report_id=report_id,
                 prompt_tokens=llm_response.prompt_tokens,
                 completion_tokens=llm_response.completion_tokens,
+                key_source="request" if request_key else "env",
+                key_ref=(llm_override.key_ref if (llm_override and request_key) else None),
             )
             report_update_status(report_id, "fix_proposed")
 
@@ -389,7 +435,10 @@ async def propose_fix(report_id: str) -> None:
     except FixProposalDefer as exc:
         # Precondition not met — not a fix attempt. Return to triaged WITHOUT
         # recording a failure, so it never counts toward max_fix_retries.
-        logger.info("Fix proposal deferred for report %s: %s", report_id, exc)
+        logger.info(
+            "Fix proposal deferred for report %s: %s",
+            report_id, _safe_error_text(exc, secrets),
+        )
         async with db_write_lock:
             try_claim_report(report_id, "fix_proposing", "triaged")
 
@@ -397,20 +446,23 @@ async def propose_fix(report_id: str) -> None:
         # A real fix attempt failed. Record a failed `fix` analysis row so the
         # retry gate can cap re-dispatch, and classify transient vs permanent
         # (permanent = never retry — bad output or auth failure).
+        # Classification reads the exception; only the sanitized text is
+        # logged or persisted (it may contain a request-supplied key).
         if isinstance(exc, FixProposalError):
             permanent = exc.permanent
         else:
             permanent = _classify_llm_error(exc)
+        error_text = _safe_error_text(exc, secrets)
         logger.error(
             "Fix proposal failed for report %s (permanent=%s): %s",
-            report_id, permanent, exc,
+            report_id, permanent, error_text,
         )
         async with db_write_lock:
             analysis_create(
                 bug_report_id=report_id,
                 phase="fix",
                 status="failed",
-                result={"error": str(exc), "permanent": permanent},
+                result={"error": error_text, "permanent": permanent},
                 completed_at=datetime.now(timezone.utc).isoformat(),
             )
             try_claim_report(report_id, "fix_proposing", "triaged")

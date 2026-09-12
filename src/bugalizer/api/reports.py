@@ -268,6 +268,31 @@ async def analyze_report(
     if not row:
         raise HTTPException(status_code=404, detail="Bug report not found")
 
+    # Phase 7 (D3): per-request override rules. Fixed detail strings only;
+    # never interpolate request fields (the body may carry a key).
+    override = body.llm
+    if override is not None:
+        if body.tier != AnalysisTier.CLOUD:
+            raise HTTPException(
+                status_code=422,
+                detail="llm override is accepted with tier 'cloud' only",
+            )
+        if override.key_ref is not None and not override.has_key():
+            raise HTTPException(
+                status_code=422,
+                detail="llm.key_ref requires llm.api_key",
+            )
+        if (
+            override.key_ref is not None
+            and override.api_key is not None
+            and override.key_ref == override.api_key.get_secret_value()
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="llm.key_ref must not be the api_key value",
+            )
+
+    llm_source: Optional[str] = None
     if body.tier == AnalysisTier.LOCAL:
         # Local (re-)analysis is a manual override: allow it from 'triaged' or
         # from 'clarification_needed' (the whole point is to push a report the
@@ -313,10 +338,29 @@ async def analyze_report(
                     f"head_sha={head_sha!r}); re-run local analysis first"
                 ),
             )
-        background_tasks.add_task(process_fix_proposal, report_id)
+        if override is not None and (
+            override.provider or override.model or override.has_key()
+        ):
+            llm_source = "request"
+            # The override rides as a background-task argument only: it is
+            # not persisted, and the task runs in this process.
+            background_tasks.add_task(
+                process_fix_proposal, report_id, llm_override=override
+            )
+        else:
+            llm_source = (
+                "project"
+                if project and (
+                    project.get("fix_llm_provider") or project.get("fix_llm_model")
+                )
+                else "global"
+            )
+            background_tasks.add_task(process_fix_proposal, report_id)
         detail = "Cloud fix proposal dispatched"
 
-    return AnalyzeResponse(id=report_id, tier=body.tier.value, detail=detail)
+    return AnalyzeResponse(
+        id=report_id, tier=body.tier.value, detail=detail, llm_source=llm_source
+    )
 
 
 @router.get("/reports/{report_id}/analyses")

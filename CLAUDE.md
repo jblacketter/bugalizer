@@ -6,7 +6,7 @@ AI-powered bug report processing server. Accepts structured bug reports via REST
 ## Quick Start
 ```bash
 uv sync --dev
-uv run pytest                # 201 tests, all should pass
+uv run pytest                # the full suite, all pass; LLM calls are mocked
 
 # Run the server
 BUGALIZER_DB_PATH=bugalizer.db uv run uvicorn bugalizer.main:app --port 8090
@@ -44,13 +44,15 @@ src/bugalizer/
   queue/
     worker.py      # Async background queue worker (Stages 1-3)
 tests/
-  test_api.py      # 30 tests: API + phase gating
-  test_pipeline.py # 19 tests: validation, triage, orchestrator
-  test_queue.py    # 11 tests: eligibility, retries, db locking
-  test_usage.py    # 6 tests: usage endpoints, retry endpoint
-  test_git_ops.py  # 15 tests: git operations
-  test_repo_map.py # 11 tests: repo map builder + cache
-  test_localizer.py # 21 tests: localization, eligibility, path safety, migration
+  test_api.py      # API + phase gating, health, projects (incl. ingest fields), validation secrecy
+  test_analysis_mode.py # analysis_mode gating, manual analyze endpoint, per-request LLM override
+  test_pipeline.py # validation, triage, orchestrator
+  test_queue.py    # eligibility, retries, db locking
+  test_usage.py    # usage endpoints (incl. key_source/key_ref attribution), retry endpoint
+  test_git_ops.py  # git operations
+  test_repo_map.py # repo map builder + cache
+  test_localizer.py # localization, eligibility, path safety, migration
+  test_fix_proposer.py # Stage 4: proposals, retry classification, override + key secrecy
 ```
 
 ## Architecture

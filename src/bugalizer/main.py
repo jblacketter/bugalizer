@@ -9,9 +9,10 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from bugalizer import __version__
@@ -71,6 +72,23 @@ async def _check_ollama() -> bool:
         return False
 
 
+async def _validation_error_without_input(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """422 handler that never echoes the request body (Phase 7 secrecy).
+
+    FastAPI's default handler copies each error's `input` (for a body-level
+    error, the whole body) into the response, which would return a
+    request-supplied API key to the caller. Keep `loc`, `msg`, `type`; drop
+    `input` and `ctx` project-wide (nothing here relies on them).
+    """
+    errors = [
+        {k: v for k, v in err.items() if k not in ("input", "ctx")}
+        for err in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": errors})
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Bugalizer",
@@ -78,6 +96,7 @@ def create_app() -> FastAPI:
         version=__version__,
         lifespan=lifespan,
     )
+    app.add_exception_handler(RequestValidationError, _validation_error_without_input)
 
     # CORS is closed by default (empty origin list). The dashboard is served
     # same-origin by this app; other LAN apps call server-to-server with API
@@ -133,6 +152,10 @@ def create_app() -> FastAPI:
         return {
             "status": overall,
             "version": __version__,
+            # Phase 7: false when BUGALIZER_API_KEYS is empty. The Aegis
+            # engine proxy refuses to start against a Bugalizer that reports
+            # false.
+            "auth_enabled": bool(settings.valid_api_keys()),
             "checks": {
                 "database": db_ok,
                 "ollama": ollama_ok,

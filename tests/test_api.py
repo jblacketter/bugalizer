@@ -687,3 +687,302 @@ def test_cors_allows_configured_origin():
         assert r.headers.get("access-control-allow-origin") == "http://dash.local"
     finally:
         settings.cors_origins = ""
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 (B0): health auth flag, validation-error secrecy, ingest fields
+# ---------------------------------------------------------------------------
+
+def test_health_reports_auth_enabled_false_when_keys_empty():
+    from bugalizer.config import settings
+    settings.api_keys = ""
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json()["auth_enabled"] is False
+
+
+def test_health_reports_auth_enabled_true_when_keys_set():
+    from bugalizer.config import settings
+    settings.api_keys = "k-one,k-two"
+    try:
+        r = client.get("/health", headers={"X-API-Key": "k-one"})
+        assert r.status_code == 200
+        assert r.json()["auth_enabled"] is True
+    finally:
+        settings.api_keys = ""
+
+
+def test_validation_errors_never_echo_input():
+    """FastAPI's default 422 copies each error's `input` (the whole body for a
+    body-level error) into the response. The project-wide handler drops it."""
+    r = client.post(
+        "/api/v1/projects",
+        json={"name": "x", "repo_url": "https://example.com/r.git", "llm_model": 12345},
+    )
+    assert r.status_code == 422
+    body = r.json()
+    assert body["detail"], "expected at least one error entry"
+    for err in body["detail"]:
+        assert "input" not in err
+        assert "ctx" not in err
+        assert {"loc", "msg", "type"} <= set(err)
+    assert "12345" not in r.text
+
+
+def _triaged_report_via_api():
+    from bugalizer.db import report_update_status
+    pid = client.post(
+        "/api/v1/projects",
+        json={"name": "demo", "repo_url": "https://example.com/r.git"},
+    ).json()["id"]
+    rid = client.post(
+        "/api/v1/reports",
+        json={
+            "title": "bug",
+            "description": "something broke",
+            "reporter": "qa@example.com",
+            "project_id": pid,
+        },
+    ).json()["id"]
+    report_update_status(rid, "triaged")
+    return rid
+
+
+SENTINEL_KEY = "sk-ant-SENTINEL-0123456789abcdef-DO-NOT-LEAK"
+
+
+def test_analyze_override_with_local_tier_is_422_without_echo():
+    rid = _triaged_report_via_api()
+    r = client.post(
+        f"/api/v1/reports/{rid}/analyze",
+        json={"tier": "local", "llm": {"api_key": SENTINEL_KEY}},
+    )
+    assert r.status_code == 422
+    assert "cloud" in r.json()["detail"]
+    assert SENTINEL_KEY not in r.text
+
+
+def test_analyze_override_invalid_tier_is_422_without_echo():
+    """A pydantic-level error on `tier` must not echo the body (which carries
+    the key) through the default `input` field."""
+    rid = _triaged_report_via_api()
+    r = client.post(
+        f"/api/v1/reports/{rid}/analyze",
+        json={"tier": "gpu", "llm": {"api_key": SENTINEL_KEY, "key_ref": "aegis:1"}},
+    )
+    assert r.status_code == 422
+    assert SENTINEL_KEY not in r.text
+
+
+def test_analyze_key_ref_without_api_key_is_422():
+    rid = _triaged_report_via_api()
+    r = client.post(
+        f"/api/v1/reports/{rid}/analyze",
+        json={"tier": "cloud", "llm": {"provider": "anthropic", "key_ref": "aegis:ai_settings:7"}},
+    )
+    assert r.status_code == 422
+    assert "key_ref" in r.json()["detail"]
+
+
+def test_analyze_key_ref_equal_to_key_is_422_without_echo():
+    rid = _triaged_report_via_api()
+    r = client.post(
+        f"/api/v1/reports/{rid}/analyze",
+        json={"tier": "cloud", "llm": {"api_key": "abc.def-123", "key_ref": "abc.def-123"}},
+    )
+    assert r.status_code == 422
+    assert "abc.def-123" not in r.text
+
+
+def test_analyze_key_ref_bad_charset_is_422_without_echo():
+    rid = _triaged_report_via_api()
+    r = client.post(
+        f"/api/v1/reports/{rid}/analyze",
+        json={"tier": "cloud", "llm": {"api_key": SENTINEL_KEY, "key_ref": "has space!"}},
+    )
+    assert r.status_code == 422
+    assert SENTINEL_KEY not in r.text
+    assert "has space!" not in r.text
+
+
+# --- ingest_source / ingest_config -----------------------------------------
+
+def _supabase_config(**overrides):
+    cfg = {
+        "url": "https://abc.supabase.co",
+        "table": "bug_reports",
+        "credential_env": "SONICGRID_SUPABASE_KEY",
+    }
+    cfg.update(overrides)
+    return cfg
+
+
+def _project_body(**overrides):
+    data = {"name": "ingest", "repo_url": "https://example.com/r.git"}
+    data.update(overrides)
+    return data
+
+
+def test_project_ingest_pair_roundtrip():
+    r = client.post(
+        "/api/v1/projects",
+        json=_project_body(ingest_source="supabase", ingest_config=_supabase_config()),
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["ingest_source"] == "supabase"
+    assert body["ingest_config"] == _supabase_config()
+
+    got = client.get(f"/api/v1/projects/{body['id']}").json()
+    assert got["ingest_source"] == "supabase"
+    assert got["ingest_config"] == _supabase_config()
+
+    listed = client.get("/api/v1/projects").json()["projects"]
+    assert any(p["id"] == body["id"] and p["ingest_config"] == _supabase_config() for p in listed)
+
+
+def test_project_ingest_defaults_null():
+    body = client.post("/api/v1/projects", json=_project_body()).json()
+    assert body["ingest_source"] is None
+    assert body["ingest_config"] is None
+
+
+def test_project_ingest_source_without_config_is_422():
+    r = client.post("/api/v1/projects", json=_project_body(ingest_source="supabase"))
+    assert r.status_code == 422
+    assert "ingest_config" in r.json()["detail"]
+
+
+def test_project_ingest_config_without_source_is_422():
+    r = client.post("/api/v1/projects", json=_project_body(ingest_config=_supabase_config()))
+    assert r.status_code == 422
+    assert "ingest_source" in r.json()["detail"]
+
+
+def test_project_ingest_unknown_source_is_422():
+    r = client.post(
+        "/api/v1/projects",
+        json=_project_body(ingest_source="jira", ingest_config=_supabase_config()),
+    )
+    assert r.status_code == 422
+    assert "unknown ingest_source" in r.json()["detail"]
+
+
+def test_project_ingest_extra_secret_field_is_422_without_echo():
+    r = client.post(
+        "/api/v1/projects",
+        json=_project_body(
+            ingest_source="supabase",
+            ingest_config=_supabase_config(service_key="eyJ-SECRET-VALUE"),
+        ),
+    )
+    assert r.status_code == 422
+    assert "service_key" in r.json()["detail"]
+    assert "eyJ-SECRET-VALUE" not in r.text
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:pw@abc.supabase.co",       # userinfo
+        "https://abc.supabase.co/?apikey=SECRET",  # query string
+        "http://abc.supabase.co",                # not https
+        "https://abc.supabase.co/#frag",         # fragment
+    ],
+)
+def test_project_ingest_bad_url_is_422(url):
+    r = client.post(
+        "/api/v1/projects",
+        json=_project_body(ingest_source="supabase", ingest_config=_supabase_config(url=url)),
+    )
+    assert r.status_code == 422
+    assert "url" in r.json()["detail"]
+    assert "SECRET" not in r.text and "pw@" not in r.text
+
+
+@pytest.mark.parametrize("env_name", ["supabase_key", "SUPABASE-KEY", "1KEY", "sk-live-abc"])
+def test_project_ingest_bad_credential_env_is_422(env_name):
+    r = client.post(
+        "/api/v1/projects",
+        json=_project_body(
+            ingest_source="supabase", ingest_config=_supabase_config(credential_env=env_name)
+        ),
+    )
+    assert r.status_code == 422
+    assert "credential_env" in r.json()["detail"]
+
+
+def test_project_ingest_bad_table_is_422():
+    r = client.post(
+        "/api/v1/projects",
+        json=_project_body(
+            ingest_source="supabase", ingest_config=_supabase_config(table="bug reports; drop")
+        ),
+    )
+    assert r.status_code == 422
+    assert "table" in r.json()["detail"]
+
+
+def test_project_patch_config_only_validates_against_stored_source():
+    pid = client.post(
+        "/api/v1/projects",
+        json=_project_body(ingest_source="supabase", ingest_config=_supabase_config()),
+    ).json()["id"]
+    new_cfg = _supabase_config(table="bugs_v2")
+    r = client.patch(f"/api/v1/projects/{pid}", json={"ingest_config": new_cfg})
+    assert r.status_code == 200, r.text
+    assert r.json()["ingest_source"] == "supabase"
+    assert r.json()["ingest_config"] == new_cfg
+
+
+def test_project_patch_config_only_without_stored_source_is_422():
+    pid = client.post("/api/v1/projects", json=_project_body()).json()["id"]
+    r = client.patch(f"/api/v1/projects/{pid}", json={"ingest_config": _supabase_config()})
+    assert r.status_code == 422
+    assert "ingest_source" in r.json()["detail"]
+
+
+def test_project_patch_source_only_without_config_is_422():
+    pid = client.post("/api/v1/projects", json=_project_body()).json()["id"]
+    r = client.patch(f"/api/v1/projects/{pid}", json={"ingest_source": "supabase"})
+    assert r.status_code == 422
+    assert "ingest_config" in r.json()["detail"]
+
+
+def test_project_patch_pair_sets_both():
+    pid = client.post("/api/v1/projects", json=_project_body()).json()["id"]
+    r = client.patch(
+        f"/api/v1/projects/{pid}",
+        json={"ingest_source": "supabase", "ingest_config": _supabase_config()},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["ingest_source"] == "supabase"
+    assert r.json()["ingest_config"] == _supabase_config()
+
+
+@pytest.mark.parametrize("field", ["ingest_source", "ingest_config"])
+def test_project_patch_null_on_either_clears_both(field):
+    pid = client.post(
+        "/api/v1/projects",
+        json=_project_body(ingest_source="supabase", ingest_config=_supabase_config()),
+    ).json()["id"]
+    r = client.patch(f"/api/v1/projects/{pid}", json={field: None})
+    assert r.status_code == 200, r.text
+    assert r.json()["ingest_source"] is None
+    assert r.json()["ingest_config"] is None
+    got = client.get(f"/api/v1/projects/{pid}").json()
+    assert got["ingest_source"] is None and got["ingest_config"] is None
+
+
+def test_project_patch_invalid_config_leaves_row_unchanged():
+    pid = client.post(
+        "/api/v1/projects",
+        json=_project_body(ingest_source="supabase", ingest_config=_supabase_config()),
+    ).json()["id"]
+    r = client.patch(
+        f"/api/v1/projects/{pid}",
+        json={"ingest_config": _supabase_config(url="http://plain.example")},
+    )
+    assert r.status_code == 422
+    got = client.get(f"/api/v1/projects/{pid}").json()
+    assert got["ingest_config"] == _supabase_config()

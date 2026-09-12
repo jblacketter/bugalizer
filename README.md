@@ -61,7 +61,7 @@ uv sync --dev
 
 ```bash
 uv run pytest
-# 191 tests, all should pass (no Ollama required — LLM calls are mocked)
+# The full suite, all pass. No Ollama required: LLM calls are mocked.
 ```
 
 ### Start the Server

@@ -142,6 +142,31 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.commit()
         logger.info("Migration: added bug_reports.analysis_mode column")
 
+    # Phase 7: per-project ingest seam (B1 builds the poller on it). Both
+    # nullable; the API enforces "both null or both set".
+    if "ingest_source" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN ingest_source TEXT")
+        conn.commit()
+        logger.info("Migration: added projects.ingest_source column")
+    if "ingest_config" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN ingest_config TEXT")
+        conn.commit()
+        logger.info("Migration: added projects.ingest_config column")
+
+    # Phase 7: cloud-spend attribution. key_source = request | env; key_ref =
+    # the caller's opaque settings-row reference. Pre-Phase-7 rows stay null.
+    # (An empty column set means the table does not exist yet; the schema
+    # script creates it with both columns, so there is nothing to alter.)
+    tu_columns = {row[1] for row in conn.execute("PRAGMA table_info(token_usage)").fetchall()}
+    if tu_columns and "key_source" not in tu_columns:
+        conn.execute("ALTER TABLE token_usage ADD COLUMN key_source TEXT")
+        conn.commit()
+        logger.info("Migration: added token_usage.key_source column")
+    if tu_columns and "key_ref" not in tu_columns:
+        conn.execute("ALTER TABLE token_usage ADD COLUMN key_ref TEXT")
+        conn.commit()
+        logger.info("Migration: added token_usage.key_ref column")
+
 
 _now_lock = threading.Lock()
 _last_now_dt: Optional[datetime] = None
@@ -187,6 +212,8 @@ CREATE TABLE IF NOT EXISTS projects (
     llm_model TEXT DEFAULT 'qwen2.5-coder:7b',
     fix_llm_provider TEXT,
     fix_llm_model TEXT,
+    ingest_source TEXT,
+    ingest_config TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -263,6 +290,8 @@ CREATE TABLE IF NOT EXISTS token_usage (
     prompt_tokens INTEGER DEFAULT 0,
     completion_tokens INTEGER DEFAULT 0,
     estimated_cost_usd REAL DEFAULT 0.0,
+    key_source TEXT,
+    key_ref TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -282,30 +311,47 @@ def project_create(
     llm_model: str = "qwen2.5-coder:7b",
     fix_llm_provider: Optional[str] = None,
     fix_llm_model: Optional[str] = None,
+    ingest_source: Optional[str] = None,
+    ingest_config: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     conn = _get_conn()
     row_id = _new_id()
     now = _now()
     conn.execute(
         """INSERT INTO projects (id, name, repo_url, default_branch, llm_provider, llm_model,
-                                 fix_llm_provider, fix_llm_model, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                 fix_llm_provider, fix_llm_model, ingest_source, ingest_config,
+                                 created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (row_id, name, repo_url, default_branch, llm_provider, llm_model,
-         fix_llm_provider, fix_llm_model, now, now),
+         fix_llm_provider, fix_llm_model, ingest_source,
+         json.dumps(ingest_config) if ingest_config is not None else None,
+         now, now),
     )
     conn.commit()
-    return dict(conn.execute("SELECT * FROM projects WHERE id = ?", (row_id,)).fetchone())
+    return project_get(row_id)  # type: ignore[return-value]
+
+
+def _project_row(row: Any) -> dict[str, Any]:
+    """Row -> dict with `ingest_config` deserialized from its JSON column."""
+    d = dict(row)
+    raw = d.get("ingest_config")
+    if isinstance(raw, str):
+        try:
+            d["ingest_config"] = json.loads(raw)
+        except json.JSONDecodeError:
+            d["ingest_config"] = None
+    return d
 
 
 def project_get(project_id: str) -> Optional[dict[str, Any]]:
     conn = _get_conn()
     row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-    return dict(row) if row else None
+    return _project_row(row) if row else None
 
 
 def project_list() -> list[dict[str, Any]]:
     conn = _get_conn()
-    return [dict(r) for r in conn.execute("SELECT * FROM projects ORDER BY created_at DESC").fetchall()]
+    return [_project_row(r) for r in conn.execute("SELECT * FROM projects ORDER BY created_at DESC").fetchall()]
 
 
 def project_update(project_id: str, **fields: Any) -> Optional[dict[str, Any]]:
@@ -313,6 +359,8 @@ def project_update(project_id: str, **fields: Any) -> Optional[dict[str, Any]]:
     existing = project_get(project_id)
     if not existing:
         return None
+    if isinstance(fields.get("ingest_config"), dict):
+        fields["ingest_config"] = json.dumps(fields["ingest_config"])
     fields["updated_at"] = _now()
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [project_id]
@@ -1138,16 +1186,26 @@ def token_usage_create(
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     estimated_cost_usd: float = 0.0,
+    key_source: Optional[str] = None,
+    key_ref: Optional[str] = None,
 ) -> dict[str, Any]:
+    """Record one LLM call's usage.
+
+    `key_source` (`request` | `env`) and `key_ref` (the caller's opaque
+    settings-row reference) are the Phase 7 attribution columns. The key
+    itself is never passed here.
+    """
     conn = _get_conn()
     now = _now()
     conn.execute(
         """INSERT INTO token_usage
            (project_id, bug_report_id, provider, model,
-            prompt_tokens, completion_tokens, estimated_cost_usd, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            prompt_tokens, completion_tokens, estimated_cost_usd,
+            key_source, key_ref, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (project_id, bug_report_id, provider, model,
-         prompt_tokens, completion_tokens, estimated_cost_usd, now),
+         prompt_tokens, completion_tokens, estimated_cost_usd,
+         key_source, key_ref, now),
     )
     conn.commit()
     return {
@@ -1157,6 +1215,8 @@ def token_usage_create(
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "estimated_cost_usd": estimated_cost_usd,
+        "key_source": key_source,
+        "key_ref": key_ref,
     }
 
 
@@ -1191,9 +1251,33 @@ def token_usage_summary(project_id: Optional[str] = None) -> dict[str, Any]:
             "estimated_cost_usd": row["total_cost"],
         }
 
+    # Phase 7: the same totals grouped by who paid (key_source + key_ref).
+    # Additive to the aggregate above; pre-Phase-7 rows group under nulls.
+    attr_query = """SELECT key_source, key_ref,
+                    COUNT(*) as calls,
+                    SUM(prompt_tokens) as total_prompt,
+                    SUM(completion_tokens) as total_completion,
+                    SUM(estimated_cost_usd) as total_cost
+                    FROM token_usage"""
+    if project_id:
+        attr_query += " WHERE project_id = ?"
+    attr_query += " GROUP BY key_source, key_ref ORDER BY key_source, key_ref"
+    attribution = [
+        {
+            "key_source": r["key_source"],
+            "key_ref": r["key_ref"],
+            "calls": r["calls"],
+            "prompt_tokens": r["total_prompt"],
+            "completion_tokens": r["total_completion"],
+            "estimated_cost_usd": r["total_cost"],
+        }
+        for r in conn.execute(attr_query, params).fetchall()
+    ]
+
     return {
         "total_prompt_tokens": total_prompt,
         "total_completion_tokens": total_completion,
         "total_estimated_cost_usd": total_cost,
         "by_provider": by_provider,
+        "attribution": attribution,
     }

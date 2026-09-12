@@ -112,6 +112,18 @@ home LAN.)
 - Dashboard: open `http://<lan-host>:8090/`, paste an API key in the
   top-right box (stored in the browser's localStorage).
 
+Or run all of that in one go from the checkout (deployed commit, both health
+endpoints including `auth_enabled`, Ollama reachability, and whether Docker or
+NSSM is serving):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\check-service.ps1
+```
+
+`auth_enabled: false` means `BUGALIZER_API_KEYS` is empty; fix that before the
+service is reachable from the LAN. The script's output is the post-merge
+acceptance record for a phase.
+
 Then run the full end-to-end check: see [`smoke-test.md`](smoke-test.md).
 
 ## 7. How other LAN apps submit bugs

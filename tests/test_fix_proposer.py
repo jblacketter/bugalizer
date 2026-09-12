@@ -424,3 +424,193 @@ def test_classify_llm_error():
     assert _classify_llm_error(TimeoutError("timed out")) is False
     assert _classify_llm_error(RuntimeError("BUGALIZER_ANTHROPIC_API_KEY not set")) is True
     assert _classify_llm_error(RuntimeError("connection reset")) is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 (B0): per-request LLM override + key secrecy on every path
+# ---------------------------------------------------------------------------
+
+import logging
+
+from fastapi.testclient import TestClient
+
+from bugalizer.main import app
+from bugalizer.models import LLMOverride
+from bugalizer.pipeline.fix_proposer import _safe_error_text
+
+SENTINEL_KEY = "sk-ant-SENTINEL-0123456789abcdef-DO-NOT-LEAK"
+api = TestClient(app)
+
+
+def _dump_all_tables() -> str:
+    """Every value in every table, as one string, for absence assertions."""
+    conn = db._get_conn()
+    names = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    chunks = []
+    for name in names:
+        for row in conn.execute(f"SELECT * FROM {name}").fetchall():
+            chunks.append(repr(tuple(row)))
+    return "\n".join(chunks)
+
+
+def _api_bodies(report_id: str) -> str:
+    """Concatenated bodies of every read endpoint that could surface the run."""
+    paths = [
+        f"/api/v1/reports/{report_id}",
+        f"/api/v1/reports/{report_id}/analyses",
+        f"/api/v1/reports/{report_id}/fix_proposals",
+        "/api/v1/queue",
+        "/api/v1/usage",
+    ]
+    return "\n".join(api.get(p).text for p in paths)
+
+
+def _assert_key_nowhere(report_id: str, caplog) -> None:
+    assert SENTINEL_KEY not in _dump_all_tables()
+    assert SENTINEL_KEY not in caplog.text
+    assert SENTINEL_KEY not in _api_bodies(report_id)
+
+
+class AuthenticationError(Exception):
+    """Type name matches litellm's; `_classify_llm_error` keys on the name."""
+
+
+class RateLimitError(Exception):
+    """Transient by type name."""
+
+
+def test_safe_error_text_redacts_supplied_secret_and_key_shapes():
+    exc = ValueError(f"invalid key {SENTINEL_KEY}; also Bearer abcdefghijklmnop and sk-livexyz12345678")
+    text = _safe_error_text(exc, [SENTINEL_KEY])
+    assert text.startswith("ValueError: ")
+    assert SENTINEL_KEY not in text
+    assert "abcdefghijklmnop" not in text
+    assert "sk-livexyz12345678" not in text
+    assert "[redacted]" in text
+    # Ordinary text survives, and empty secrets are ignored.
+    assert "invalid key" in text
+    assert _safe_error_text(RuntimeError("plain"), ["", None][:1]) == "RuntimeError: plain"
+
+
+def test_llm_override_repr_and_dump_mask_key():
+    ov = LLMOverride(provider="anthropic", model="m", api_key=SENTINEL_KEY, key_ref="aegis:1")
+    assert SENTINEL_KEY not in repr(ov)
+    assert SENTINEL_KEY not in str(ov.model_dump())
+    assert SENTINEL_KEY not in ov.model_dump_json()
+    assert ov.has_key()
+    assert not LLMOverride(provider="anthropic").has_key()
+
+
+@pytest.mark.asyncio
+async def test_override_reaches_complete_and_attributes_usage(tmp_path, caplog):
+    caplog.set_level(logging.DEBUG)
+    report, _ = _seed_fixture_report(tmp_path)
+    mock_llm = AsyncMock(return_value=_make_llm_response_for_proposal(_valid_proposal_payload()))
+    override = LLMOverride(
+        provider="openai", model="gpt-5", api_key=SENTINEL_KEY, key_ref="aegis:ai_settings:42"
+    )
+    with patch("bugalizer.pipeline.fix_proposer.llm_client.complete", new=mock_llm):
+        await propose_fix(report["id"], llm_override=override)
+
+    mock_llm.assert_awaited_once()
+    kwargs = mock_llm.await_args.kwargs
+    assert kwargs["provider"] == "openai"
+    assert kwargs["model"] == "gpt-5"
+    assert kwargs["api_key"] == SENTINEL_KEY
+
+    assert report_get(report["id"])["status"] == "fix_proposed"
+    row = db._get_conn().execute(
+        "SELECT key_source, key_ref FROM token_usage WHERE bug_report_id = ?", (report["id"],)
+    ).fetchone()
+    assert (row["key_source"], row["key_ref"]) == ("request", "aegis:ai_settings:42")
+    _assert_key_nowhere(report["id"], caplog)
+
+
+@pytest.mark.asyncio
+async def test_override_partial_fields_fall_back(tmp_path):
+    """Model only: provider comes from project/global resolution; no request
+    key means key_source=env and no key_ref even if... none was given."""
+    report, _ = _seed_fixture_report(tmp_path)
+    settings.fix_provider = "anthropic"
+    settings.default_fix_model = "claude-default"
+    mock_llm = AsyncMock(return_value=_make_llm_response_for_proposal(_valid_proposal_payload()))
+    with patch("bugalizer.pipeline.fix_proposer.llm_client.complete", new=mock_llm):
+        await propose_fix(report["id"], llm_override=LLMOverride(model="claude-pinned"))
+
+    kwargs = mock_llm.await_args.kwargs
+    assert kwargs["provider"] == "anthropic"
+    assert kwargs["model"] == "claude-pinned"
+    assert kwargs["api_key"] is None
+    row = db._get_conn().execute(
+        "SELECT key_source, key_ref FROM token_usage WHERE bug_report_id = ?", (report["id"],)
+    ).fetchone()
+    assert (row["key_source"], row["key_ref"]) == ("env", None)
+
+
+@pytest.mark.asyncio
+async def test_no_override_records_env_source(tmp_path):
+    report, _ = _seed_fixture_report(tmp_path)
+    mock_llm = AsyncMock(return_value=_make_llm_response_for_proposal(_valid_proposal_payload()))
+    with patch("bugalizer.pipeline.fix_proposer.llm_client.complete", new=mock_llm):
+        await propose_fix(report["id"])
+    assert mock_llm.await_args.kwargs["api_key"] is None
+    row = db._get_conn().execute(
+        "SELECT key_source, key_ref FROM token_usage WHERE bug_report_id = ?", (report["id"],)
+    ).fetchone()
+    assert (row["key_source"], row["key_ref"]) == ("env", None)
+
+
+@pytest.mark.asyncio
+async def test_request_key_absent_after_permanent_provider_failure(tmp_path, caplog):
+    """The provider echoes the key in its auth error. Classification stays
+    permanent; the persisted/logged text is redacted; the key is nowhere."""
+    caplog.set_level(logging.DEBUG)
+    report, _ = _seed_fixture_report(tmp_path)
+    mock_llm = AsyncMock(side_effect=AuthenticationError(f"invalid x-api-key: {SENTINEL_KEY}"))
+    override = LLMOverride(provider="anthropic", api_key=SENTINEL_KEY, key_ref="aegis:1")
+    with patch("bugalizer.pipeline.fix_proposer.llm_client.complete", new=mock_llm):
+        await propose_fix(report["id"], llm_override=override)
+
+    assert report_get(report["id"])["status"] == "triaged"
+    failed = _failed_fix_rows(report["id"])
+    assert len(failed) == 1
+    assert failed[0]["result"]["permanent"] is True
+    assert "[redacted]" in failed[0]["result"]["error"]
+    assert failed[0]["result"]["error"].startswith("AuthenticationError:")
+    # Surfaced through the API as last_error, still redacted.
+    detail = api.get(f"/api/v1/reports/{report['id']}").json()
+    assert detail["failed_stage"] == "fix"
+    assert "[redacted]" in detail["last_error"]
+    _assert_key_nowhere(report["id"], caplog)
+
+
+@pytest.mark.asyncio
+async def test_request_key_absent_after_transient_provider_failure(tmp_path, caplog):
+    caplog.set_level(logging.DEBUG)
+    report, _ = _seed_fixture_report(tmp_path)
+    mock_llm = AsyncMock(side_effect=RateLimitError(f"slow down {SENTINEL_KEY}"))
+    override = LLMOverride(provider="anthropic", api_key=SENTINEL_KEY)
+    with patch("bugalizer.pipeline.fix_proposer.llm_client.complete", new=mock_llm):
+        await propose_fix(report["id"], llm_override=override)
+
+    failed = _failed_fix_rows(report["id"])
+    assert len(failed) == 1
+    assert failed[0]["result"]["permanent"] is False
+    assert "[redacted]" in failed[0]["result"]["error"]
+    _assert_key_nowhere(report["id"], caplog)
+
+
+@pytest.mark.asyncio
+async def test_request_key_absent_after_bad_output(tmp_path, caplog):
+    """A FixProposalError path (bad model output) with a request key in play:
+    nothing on that path formats the override either."""
+    caplog.set_level(logging.DEBUG)
+    report, _ = _seed_fixture_report(tmp_path)
+    bad = LLMResponse(content="not json at all", prompt_tokens=1, completion_tokens=1,
+                      model="anthropic/x", provider="anthropic")
+    mock_llm = AsyncMock(return_value=bad)
+    with patch("bugalizer.pipeline.fix_proposer.llm_client.complete", new=mock_llm):
+        await propose_fix(report["id"], llm_override=LLMOverride(api_key=SENTINEL_KEY))
+    assert len(_failed_fix_rows(report["id"])) == 1
+    _assert_key_nowhere(report["id"], caplog)
