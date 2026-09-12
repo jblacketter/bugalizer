@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
+import subprocess
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Optional
 
 import httpx
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from bugalizer import __version__
@@ -28,10 +32,51 @@ logger = logging.getLogger(__name__)
 # Static assets shipped inside the package (§5.4 dashboard).
 _STATIC_DIR = Path(__file__).parent / "static"
 
+# Repo root when running from a source checkout (src/bugalizer/main.py -> ../../).
+_CHECKOUT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def detect_revision(
+    configured: str, checkout_root: Path = _CHECKOUT_ROOT
+) -> Optional[str]:
+    """Revision of the running build (Phase 7 deploy check).
+
+    Precedence: the configured value (BUGALIZER_GIT_REVISION, baked into the
+    Docker image at build time) wins; else, when the process runs from a git
+    checkout, `git rev-parse HEAD` of that checkout; else None. The result is
+    meant to be captured once at process start (see `runtime_revision`), so a
+    `git pull` under a running NSSM service does not change what the service
+    reports until it restarts.
+    """
+    if configured and configured.strip():
+        return configured.strip()
+    if not (checkout_root / ".git").exists():
+        return None
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=checkout_root,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    sha = out.stdout.strip()
+    return sha if out.returncode == 0 and sha else None
+
+
+@functools.lru_cache(maxsize=1)
+def runtime_revision() -> Optional[str]:
+    """`detect_revision` pinned to the first call of this process."""
+    return detect_revision(settings.git_revision)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     init_db()
+    logger.info("Running revision: %s", runtime_revision() or "unknown")
     if not settings.valid_api_keys():
         logger.warning(
             "API authentication is DISABLED (BUGALIZER_API_KEYS is empty). "
@@ -71,6 +116,23 @@ async def _check_ollama() -> bool:
         return False
 
 
+async def _validation_error_without_input(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """422 handler that never echoes the request body (Phase 7 secrecy).
+
+    FastAPI's default handler copies each error's `input` (for a body-level
+    error, the whole body) into the response, which would return a
+    request-supplied API key to the caller. Keep `loc`, `msg`, `type`; drop
+    `input` and `ctx` project-wide (nothing here relies on them).
+    """
+    errors = [
+        {k: v for k, v in err.items() if k not in ("input", "ctx")}
+        for err in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": errors})
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Bugalizer",
@@ -78,6 +140,7 @@ def create_app() -> FastAPI:
         version=__version__,
         lifespan=lifespan,
     )
+    app.add_exception_handler(RequestValidationError, _validation_error_without_input)
 
     # CORS is closed by default (empty origin list). The dashboard is served
     # same-origin by this app; other LAN apps call server-to-server with API
@@ -109,9 +172,13 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
     @app.get("/health/live", tags=["meta"])
-    async def liveness() -> dict[str, str]:
-        """Liveness probe for the process supervisor — cheap, no dependencies."""
-        return {"status": "ok", "version": __version__}
+    async def liveness() -> dict[str, object]:
+        """Liveness probe for the process supervisor: cheap, no dependencies.
+
+        `revision` is the running build's git revision, or null when it
+        cannot be established (see `detect_revision`).
+        """
+        return {"status": "ok", "version": __version__, "revision": runtime_revision()}
 
     @app.get("/health", tags=["meta"])
     async def readiness(response: Response) -> dict[str, object]:
@@ -133,6 +200,11 @@ def create_app() -> FastAPI:
         return {
             "status": overall,
             "version": __version__,
+            "revision": runtime_revision(),
+            # Phase 7: false when BUGALIZER_API_KEYS is empty. The Aegis
+            # engine proxy refuses to start against a Bugalizer that reports
+            # false.
+            "auth_enabled": bool(settings.valid_api_keys()),
             "checks": {
                 "database": db_ok,
                 "ollama": ollama_ok,

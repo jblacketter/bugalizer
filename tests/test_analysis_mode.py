@@ -506,3 +506,86 @@ def test_migration_adds_s53_columns_to_legacy_schema():
         "SELECT fix_llm_provider, fix_llm_model FROM projects WHERE id='p1'"
     ).fetchone()
     assert row["fix_llm_provider"] is None and row["fix_llm_model"] is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 (B0): per-request LLM override on the cloud tier
+# ---------------------------------------------------------------------------
+
+def _fresh_cloud_report():
+    project = _project()
+    project_update(project["id"], repo_path="/tmp/fake-repo", head_sha="deadbeef")
+    report = _triaged_report(project)
+    _add_fresh_localization(report["id"])
+    return project, report
+
+
+def test_analyze_cloud_with_override_dispatches_with_override_and_reports_request_source():
+    _, report = _fresh_cloud_report()
+    mock_fix = AsyncMock()
+    with patch("bugalizer.api.reports.process_fix_proposal", mock_fix):
+        r = client.post(
+            f"/api/v1/reports/{report['id']}/analyze",
+            json={
+                "tier": "cloud",
+                "llm": {
+                    "provider": "openai",
+                    "model": "gpt-5",
+                    "api_key": "sk-SENTINEL-abcdefghijklmnop",
+                    "key_ref": "aegis:ai_settings:9",
+                },
+            },
+        )
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["llm_source"] == "request"
+    assert "sk-SENTINEL" not in r.text
+
+    mock_fix.assert_awaited_once()
+    args, kwargs = mock_fix.await_args
+    assert args == (report["id"],)
+    override = kwargs["llm_override"]
+    assert override.provider == "openai"
+    assert override.model == "gpt-5"
+    assert override.key_ref == "aegis:ai_settings:9"
+    assert override.api_key.get_secret_value() == "sk-SENTINEL-abcdefghijklmnop"
+
+
+def test_analyze_cloud_without_override_reports_global_or_project_source():
+    project, report = _fresh_cloud_report()
+    mock_fix = AsyncMock()
+    with patch("bugalizer.api.reports.process_fix_proposal", mock_fix):
+        r = client.post(f"/api/v1/reports/{report['id']}/analyze", json={"tier": "cloud"})
+    assert r.status_code == 202
+    assert r.json()["llm_source"] == "global"
+    mock_fix.assert_awaited_once_with(report["id"])
+
+    # Reset the claim state for a second dispatch on the same report.
+    report_update_status(report["id"], "triaged")
+    project_update(project["id"], fix_llm_model="claude-pinned")
+    with patch("bugalizer.api.reports.process_fix_proposal", AsyncMock()):
+        r = client.post(f"/api/v1/reports/{report['id']}/analyze", json={"tier": "cloud"})
+    assert r.status_code == 202
+    assert r.json()["llm_source"] == "project"
+
+
+def test_analyze_cloud_with_empty_override_object_is_not_a_request_source():
+    """`llm: {}` carries nothing; treat it as no override."""
+    _, report = _fresh_cloud_report()
+    mock_fix = AsyncMock()
+    with patch("bugalizer.api.reports.process_fix_proposal", mock_fix):
+        r = client.post(
+            f"/api/v1/reports/{report['id']}/analyze", json={"tier": "cloud", "llm": {}}
+        )
+    assert r.status_code == 202
+    assert r.json()["llm_source"] == "global"
+    mock_fix.assert_awaited_once_with(report["id"])
+
+
+def test_analyze_local_tier_response_has_no_llm_source():
+    project = _project()
+    report = _triaged_report(project)
+    with patch("bugalizer.api.reports.run_local_analysis", AsyncMock()):
+        r = client.post(f"/api/v1/reports/{report['id']}/analyze", json={"tier": "local"})
+    assert r.status_code == 202
+    assert r.json()["llm_source"] is None

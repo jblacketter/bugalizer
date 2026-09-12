@@ -6,7 +6,7 @@ AI-powered bug report processing server. Accepts structured bug reports via REST
 ## Quick Start
 ```bash
 uv sync --dev
-uv run pytest                # 201 tests, all should pass
+uv run pytest                # the full suite, all pass; LLM calls are mocked
 
 # Run the server
 BUGALIZER_DB_PATH=bugalizer.db uv run uvicorn bugalizer.main:app --port 8090
@@ -44,13 +44,15 @@ src/bugalizer/
   queue/
     worker.py      # Async background queue worker (Stages 1-3)
 tests/
-  test_api.py      # 30 tests: API + phase gating
-  test_pipeline.py # 19 tests: validation, triage, orchestrator
-  test_queue.py    # 11 tests: eligibility, retries, db locking
-  test_usage.py    # 6 tests: usage endpoints, retry endpoint
-  test_git_ops.py  # 15 tests: git operations
-  test_repo_map.py # 11 tests: repo map builder + cache
-  test_localizer.py # 21 tests: localization, eligibility, path safety, migration
+  test_api.py      # API + phase gating, health, projects (incl. ingest fields), validation secrecy
+  test_analysis_mode.py # analysis_mode gating, manual analyze endpoint, per-request LLM override
+  test_pipeline.py # validation, triage, orchestrator
+  test_queue.py    # eligibility, retries, db locking
+  test_usage.py    # usage endpoints (incl. key_source/key_ref attribution), retry endpoint
+  test_git_ops.py  # git operations
+  test_repo_map.py # repo map builder + cache
+  test_localizer.py # localization, eligibility, path safety, migration
+  test_fix_proposer.py # Stage 4: proposals, retry classification, override + key secrecy
 ```
 
 ## Architecture
@@ -60,8 +62,8 @@ tests/
 - See `docs/phases/architecture.md` for full design
 
 ## Implementation Status
-- **Phase 1 (Foundation): COMPLETE** — API, DB, auth, workflow, tests (30/30)
-- **Phase 2 (Local LLM Pipeline): COMPLETE** — Ollama triage, async queue worker, duplicate detection, token tracking (66 tests)
+- **Phase 1 (Foundation): COMPLETE**: API, DB, auth, workflow, tests
+- **Phase 2 (Local LLM Pipeline): COMPLETE**: Ollama triage, async queue worker, duplicate detection, token tracking
 - **Phase 3 (Codebase Analysis): COMPLETE** — Git ops, tree-sitter repo maps, two-pass localization, SHA freshness
 - **Phase 4 (Fix Proposals): COMPLETE (codex-approved)** — Anthropic-via-litellm stage generates unified-diff fix proposals with prompt caching; `FIX_PROPOSING` transient claim state; SHA-freshness gate before paid calls; `GET /reports/{id}/fix_proposals` endpoint.
 - **Phase 5 (Deployment Readiness + Dashboard): COMPLETE** — all 4 cycles codex-approved;
@@ -72,7 +74,11 @@ tests/
     triage, colorized diffs, run-history timeline; per-thread SQLite connections crash fix
   - Cycle 2 (5b.3 ops visibility + 5b.4 UI workflows): IMPLEMENTED — health LEDs, filters,
     terminal collapse, project management modal, bug submission form, retry-only-when-failed
-- Phase 6 (Integrations): NOT STARTED
+- Phase 6 (Integrations): NOT STARTED; shaped by the Aegis direction record (B1 sonicgrid-ingest, B2 open-pr)
+- **Phase 7 (bugalizer-revive, B0): IMPLEMENTED, codex-approved 2026-09-12** (PR #2): per-request
+  cloud LLM override with key secrecy + `key_ref` attribution, ingest seam (`ingest_source`/`ingest_config`),
+  `/health` `auth_enabled` + `revision`, CI, `scripts/windows/check-service.ps1`. Post-merge acceptance:
+  the script reports VERIFIED on BOWIE.
 
 ## Handoff Workflow
 Uses tagteam: claude (lead) ↔ codex (reviewer). Read `tagteam.yaml` and `handoff-state.json`,

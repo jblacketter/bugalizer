@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     # SQLite database path (relative to cwd or absolute).
     db_path: str = "bugalizer.db"
 
+    # Revision of the running build, reported by /health and /health/live so a
+    # deploy check can tell what is actually serving. Set at image build time
+    # (Dockerfile ARG GIT_REVISION); when empty and the process runs from a git
+    # checkout (NSSM deploy), main.py reads `git rev-parse HEAD` once at
+    # startup. Empty and no checkout = reported as null (unknown).
+    git_revision: str = ""
+
     # Ollama
     ollama_host: str = "http://localhost:11434"
     default_triage_model: str = "qwen2.5-coder:7b"

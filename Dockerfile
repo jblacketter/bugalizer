@@ -33,6 +33,15 @@ ENV BUGALIZER_DB_PATH=/data/bugalizer.db \
     BUGALIZER_REPOS_DIR=/data/repos \
     BUGALIZER_CACHE_DIR=/data/cache
 
+# Revision of the build, reported by /health and /health/live so the deploy
+# check (scripts/windows/check-service.ps1) can tell what is serving. .git is
+# excluded from the build context, so it must be passed in:
+#   GIT_REVISION=$(git rev-parse HEAD) docker compose up -d --build
+# Left empty, the service reports revision: null (unknown), never a guess.
+ARG GIT_REVISION=""
+ENV BUGALIZER_GIT_REVISION=$GIT_REVISION
+LABEL org.opencontainers.image.revision=$GIT_REVISION
+
 EXPOSE 8090
 
 # Liveness probe (dependency-free endpoint); uses the venv python so the

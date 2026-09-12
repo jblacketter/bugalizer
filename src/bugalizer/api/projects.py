@@ -21,6 +21,7 @@ from bugalizer.models import (
     ProjectResponse,
     ProjectUpdate,
     RepoMapResponse,
+    validate_ingest_pair,
 )
 
 router = APIRouter(tags=["projects"])
@@ -37,9 +38,20 @@ def _row_to_response(row: dict) -> ProjectResponse:
         llm_model=row.get("llm_model", "qwen2.5-coder:7b"),
         fix_llm_provider=row.get("fix_llm_provider"),
         fix_llm_model=row.get("fix_llm_model"),
+        ingest_source=row.get("ingest_source"),
+        ingest_config=row.get("ingest_config"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _checked_ingest_pair(source, config):
+    """Run the ingest invariant; translate a failure into a 422 whose detail
+    names fields and reasons but never echoes values."""
+    try:
+        return validate_ingest_pair(source, config)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
 
 
 @router.post("/projects", status_code=201)
@@ -48,6 +60,9 @@ def create_project(
     _key: str = Depends(require_api_key),
 ) -> ProjectResponse:
     """Register a new project for bug analysis."""
+    ingest_source, ingest_config = _checked_ingest_pair(
+        body.ingest_source, body.ingest_config
+    )
     row = project_create(
         name=body.name,
         repo_url=body.repo_url,
@@ -56,6 +71,8 @@ def create_project(
         llm_model=body.llm_model,
         fix_llm_provider=body.fix_llm_provider,
         fix_llm_model=body.fix_llm_model,
+        ingest_source=ingest_source,
+        ingest_config=ingest_config,
     )
     return _row_to_response(row)
 
@@ -94,17 +111,36 @@ def update_project(
 
     `fix_llm_provider`/`fix_llm_model` are nullable: pass an explicit JSON
     `null` to clear the override (Stage 4 falls back to the global fix
-    settings). Other fields cannot be nulled.
+    settings). `ingest_source`/`ingest_config` (Phase 7) are validated as a
+    pair against the merged row: a config-only PATCH validates against the
+    stored source, and an explicit `null` on either clears both. Other
+    fields cannot be nulled.
     """
     updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
-    nullable = {"fix_llm_provider", "fix_llm_model"}
+    nullable = {"fix_llm_provider", "fix_llm_model", "ingest_source", "ingest_config"}
     for field, value in updates.items():
         if value is None and field not in nullable:
             raise HTTPException(
                 status_code=400, detail=f"Field '{field}' cannot be null"
             )
+
+    ingest_keys = {"ingest_source", "ingest_config"}
+    if ingest_keys & updates.keys():
+        existing = project_get(project_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if any(updates.get(k, "keep") is None for k in ingest_keys):
+            # Null on either clears both.
+            merged_source, merged_config = None, None
+        else:
+            merged_source = updates.get("ingest_source", existing.get("ingest_source"))
+            merged_config = updates.get("ingest_config", existing.get("ingest_config"))
+        source, config = _checked_ingest_pair(merged_source, merged_config)
+        updates["ingest_source"] = source
+        updates["ingest_config"] = config
+
     row = project_update(project_id, **updates)
     if not row:
         raise HTTPException(status_code=404, detail="Project not found")

@@ -134,3 +134,61 @@ def test_retry_success():
     from bugalizer.db import analyses_for_report
     remaining = [a for a in analyses_for_report(rid, phase="triage") if a["status"] == "failed"]
     assert len(remaining) == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: attribution (key_source / key_ref), additive to the aggregate
+# ---------------------------------------------------------------------------
+
+def test_usage_attribution_round_trips_distinct_key_refs():
+    pid = _create_project().json()["id"]
+    token_usage_create(project_id=pid, provider="anthropic", model="m", prompt_tokens=10,
+                       completion_tokens=1, key_source="request", key_ref="aegis:ai_settings:1")
+    token_usage_create(project_id=pid, provider="anthropic", model="m", prompt_tokens=20,
+                       completion_tokens=2, key_source="request", key_ref="aegis:ai_settings:2")
+    token_usage_create(project_id=pid, provider="anthropic", model="m", prompt_tokens=40,
+                       completion_tokens=4, key_source="request", key_ref="aegis:ai_settings:2")
+    token_usage_create(project_id=pid, provider="anthropic", model="m", prompt_tokens=80,
+                       completion_tokens=8, key_source="env", key_ref=None)
+
+    for url in ("/api/v1/usage", f"/api/v1/usage/{pid}"):
+        r = client.get(url)
+        assert r.status_code == 200
+        body = r.json()
+        # Aggregate shape preserved.
+        assert body["total_prompt_tokens"] == 150
+        assert body["total_completion_tokens"] == 15
+        assert "anthropic/m" in body["by_provider"]
+        # Attribution: one entry per (key_source, key_ref).
+        by_ref = {(a["key_source"], a["key_ref"]): a for a in body["attribution"]}
+        assert set(by_ref) == {
+            ("request", "aegis:ai_settings:1"),
+            ("request", "aegis:ai_settings:2"),
+            ("env", None),
+        }
+        assert by_ref[("request", "aegis:ai_settings:1")]["prompt_tokens"] == 10
+        assert by_ref[("request", "aegis:ai_settings:1")]["calls"] == 1
+        assert by_ref[("request", "aegis:ai_settings:2")]["prompt_tokens"] == 60
+        assert by_ref[("request", "aegis:ai_settings:2")]["calls"] == 2
+        assert by_ref[("env", None)]["prompt_tokens"] == 80
+
+
+def test_usage_attribution_pre_phase7_rows_group_under_nulls():
+    pid = _create_project().json()["id"]
+    token_usage_create(project_id=pid, provider="ollama", model="q", prompt_tokens=5)
+    body = client.get("/api/v1/usage").json()
+    assert body["attribution"] == [{
+        "key_source": None, "key_ref": None, "calls": 1,
+        "prompt_tokens": 5, "completion_tokens": 0, "estimated_cost_usd": 0.0,
+    }]
+
+
+def test_usage_attribution_is_per_project():
+    p1 = _create_project(name="P1").json()["id"]
+    p2 = _create_project(name="P2").json()["id"]
+    token_usage_create(project_id=p1, provider="anthropic", model="m", prompt_tokens=1,
+                       key_source="request", key_ref="ref:one")
+    token_usage_create(project_id=p2, provider="anthropic", model="m", prompt_tokens=2,
+                       key_source="request", key_ref="ref:two")
+    refs = {a["key_ref"] for a in client.get(f"/api/v1/usage/{p1}").json()["attribution"]}
+    assert refs == {"ref:one"}

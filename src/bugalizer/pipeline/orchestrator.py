@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 
 from bugalizer.db import (
     analysis_create,
@@ -15,6 +16,7 @@ from bugalizer.db import (
     report_update_status,
     try_claim_report,
 )
+from bugalizer.models import LLMOverride
 from bugalizer.pipeline.fix_proposer import propose_fix
 from bugalizer.pipeline.triage import triage_report
 from bugalizer.pipeline.validator import validate_report
@@ -230,7 +232,9 @@ async def run_local_analysis(report_id: str) -> None:
     await process_localization(report_id)
 
 
-async def process_fix_proposal(report_id: str) -> None:
+async def process_fix_proposal(
+    report_id: str, llm_override: Optional[LLMOverride] = None
+) -> None:
     """Stage 4 entry point — delegate to the fix-proposer stage.
 
     The stage owns its own atomic claim (TRIAGED -> FIX_PROPOSING) and
@@ -238,5 +242,9 @@ async def process_fix_proposal(report_id: str) -> None:
     orchestrator-family callers have a consistent `process_<stage>`
     entry point, matching the shape of process_submitted / _triaged /
     _localization.
+
+    `llm_override` (Phase 7) is the per-request provider/model/key from a
+    manual cloud analyze call. It lives only in this in-process task's
+    arguments; the queue worker never passes one.
     """
-    await propose_fix(report_id)
+    await propose_fix(report_id, llm_override=llm_override)

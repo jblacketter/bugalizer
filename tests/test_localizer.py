@@ -522,3 +522,68 @@ def test_migration_adds_head_sha_to_legacy_schema():
 
     # Reset for other tests
     db.reset_conn()
+
+
+def test_phase7_migration_is_idempotent_on_seeded_legacy_rows():
+    """Phase 7 adds projects.ingest_source/ingest_config and
+    token_usage.key_source/key_ref. Running _migrate twice on a database that
+    already holds a project row and a usage row succeeds both times, and the
+    existing rows read back with the new columns null."""
+    import sqlite3
+    from bugalizer import db
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            repo_url TEXT NOT NULL,
+            repo_path TEXT,
+            head_sha TEXT,
+            default_branch TEXT DEFAULT 'main',
+            llm_provider TEXT DEFAULT 'ollama',
+            llm_model TEXT DEFAULT 'qwen2.5-coder:7b',
+            fix_llm_provider TEXT,
+            fix_llm_model TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE bug_reports (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            status TEXT NOT NULL DEFAULT 'submitted',
+            analysis_mode TEXT NOT NULL DEFAULT 'auto',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE token_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            bug_report_id TEXT,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            prompt_tokens INTEGER DEFAULT 0,
+            completion_tokens INTEGER DEFAULT 0,
+            estimated_cost_usd REAL DEFAULT 0.0,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO projects (id, name, repo_url, created_at, updated_at)
+            VALUES ('p1', 'legacy', 'https://example.com/r.git', 't0', 't0');
+        INSERT INTO token_usage (project_id, provider, model, prompt_tokens, created_at)
+            VALUES ('p1', 'anthropic', 'm', 7, 't0');
+    """)
+
+    for _ in range(2):
+        db._migrate(conn)
+        p_cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)").fetchall()}
+        tu_cols = {r[1] for r in conn.execute("PRAGMA table_info(token_usage)").fetchall()}
+        assert {"ingest_source", "ingest_config"} <= p_cols
+        assert {"key_source", "key_ref"} <= tu_cols
+
+    project = conn.execute("SELECT * FROM projects WHERE id = 'p1'").fetchone()
+    assert project["name"] == "legacy"
+    assert project["ingest_source"] is None and project["ingest_config"] is None
+    usage = conn.execute("SELECT * FROM token_usage").fetchone()
+    assert usage["prompt_tokens"] == 7
+    assert usage["key_source"] is None and usage["key_ref"] is None
