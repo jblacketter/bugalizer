@@ -172,7 +172,7 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
     @app.get("/health/live", tags=["meta"])
-    async def liveness() -> dict[str, str]:
+    async def liveness() -> dict[str, object]:
         """Liveness probe for the process supervisor: cheap, no dependencies.
 
         `revision` is the running build's git revision, or null when it

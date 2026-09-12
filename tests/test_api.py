@@ -1029,3 +1029,21 @@ def test_runtime_revision_is_pinned_per_process():
     finally:
         settings.git_revision = ""
         runtime_revision.cache_clear()
+
+
+def test_health_endpoints_return_200_with_null_revision():
+    """Unknown revision (unstamped image, installed package, no checkout) is
+    a documented `revision: null`, not a 500. The Docker healthcheck hits
+    /health/live, so a 500 here would mark a healthy service unhealthy."""
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from bugalizer.main import app as _app
+    strict = TestClient(_app, raise_server_exceptions=False)
+    with patch("bugalizer.main.runtime_revision", return_value=None):
+        live = strict.get("/health/live")
+        assert live.status_code == 200, live.text
+        assert live.json()["revision"] is None
+        assert live.json()["status"] == "ok"
+        ready = strict.get("/health")
+        assert ready.status_code == 200, ready.text
+        assert ready.json()["revision"] is None
