@@ -74,7 +74,11 @@ tests/
     triage, colorized diffs, run-history timeline; per-thread SQLite connections crash fix
   - Cycle 2 (5b.3 ops visibility + 5b.4 UI workflows): IMPLEMENTED — health LEDs, filters,
     terminal collapse, project management modal, bug submission form, retry-only-when-failed
-- Phase 6 (Integrations): NOT STARTED
+- Phase 6 (Integrations): NOT STARTED; shaped by the Aegis direction record (B1 sonicgrid-ingest, B2 open-pr)
+- **Phase 7 (bugalizer-revive, B0): IMPLEMENTED, codex-approved 2026-09-12** (PR #2): per-request
+  cloud LLM override with key secrecy + `key_ref` attribution, ingest seam (`ingest_source`/`ingest_config`),
+  `/health` `auth_enabled` + `revision`, CI, `scripts/windows/check-service.ps1`. Post-merge acceptance:
+  the script reports VERIFIED on BOWIE.
 
 ## Handoff Workflow
 Uses tagteam: claude (lead) ↔ codex (reviewer). Read `tagteam.yaml` and `handoff-state.json`,

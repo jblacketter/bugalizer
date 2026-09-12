@@ -80,7 +80,9 @@ tree-sitter / uv
 - **Depends on:** Phase 7
 
 ### Phase 7: bugalizer-revive (B0)
-- **Status:** Planned 2026-09-12 (`docs/phases/bugalizer-revive.md`)
+- **Status:** Implemented 2026-09-12; impl approved by codex (round 3, PR #2 at 7b73c30,
+  `docs/handoffs/bugalizer-revive_impl_rounds.jsonl`). Complete once PR #2 is merged and
+  `scripts/windows/check-service.ps1` reports VERIFIED on BOWIE (`docs/phases/bugalizer-revive.md`)
 - **Description:** Bring the repo back under tagteam (clean tree, CI, docs
   that match the suite), add the per-request provider/model/key override on
   the cloud analyze call (D3) and the per-project ingest-source setting B1
