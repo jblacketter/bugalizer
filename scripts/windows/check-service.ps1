@@ -17,7 +17,10 @@
        A service that omits the field predates Phase 7 -> reported as unknown.
     4. Ollama reachability (GET /api/tags on the configured host).
     5. Deploy option: a bugalizer Docker container (image id, started at) or a
-       Windows service named Bugalizer (state, start time when available).
+       Windows service whose name matches -ServiceName (default pattern
+       *bugal*, which covers `Bugalizer` from the NSSM recipe and the LAN
+       Service Manager's `lan-mgr-bugalizer` style names); state and start
+       time when available.
 
   Its output is the post-merge acceptance record: paste it into the phase's
   handoff entry or PR.
@@ -32,6 +35,9 @@
 .PARAMETER OllamaHost
   Ollama base URL. Default: BUGALIZER_OLLAMA_HOST from the environment or the
   repo-root .env, else http://127.0.0.1:11434.
+
+.PARAMETER ServiceName
+  Windows service name or wildcard pattern to look for. Default *bugal*.
 
 .PARAMETER SkipDeployOption
   Skip the Docker / Windows-service probe (for running the check from a
@@ -48,6 +54,7 @@ param(
     [string]$BaseUrl = "http://127.0.0.1:8090",
     [string]$ExpectedRevision = "",
     [string]$OllamaHost = "",
+    [string]$ServiceName = "*bugal*",
     [switch]$SkipDeployOption
 )
 
@@ -257,21 +264,30 @@ if (-not $SkipDeployOption) {
             }
         }
     }
-    $svc = Get-Service -Name "Bugalizer" -ErrorAction SilentlyContinue
-    if ($svc) {
+    # Windows services: match by pattern, since the registered name depends on
+    # how it was installed (NSSM recipe: Bugalizer; LAN Service Manager:
+    # lan-mgr-bugalizer). Get-Service is Windows-only; elsewhere it is skipped.
+    $services = @()
+    try {
+        $services = @(Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)
+    } catch { $services = @() }
+    foreach ($svc in $services) {
+        if (-not $svc) { continue }
         $found = $true
         $started = ""
         try {
-            $proc = Get-CimInstance Win32_Service -Filter "Name='Bugalizer'" -ErrorAction Stop
+            $escaped = $svc.Name -replace "'", "''"
+            $proc = Get-CimInstance Win32_Service -Filter "Name='$escaped'" -ErrorAction Stop
             if ($proc.ProcessId) {
                 $p = Get-Process -Id $proc.ProcessId -ErrorAction SilentlyContinue
                 if ($p) { $started = " started=" + $p.StartTime.ToString("s") }
             }
         } catch { }
-        Write-Host ("nssm     : service '{0}' is {1}{2}" -f $svc.Name, $svc.Status, $started)
+        $stateLine = "service  : '{0}' is {1}{2}" -f $svc.Name, $svc.Status, $started
+        if ("$($svc.Status)" -eq "Running") { Write-Host $stateLine } else { Write-Problem $stateLine }
     }
     if (-not $found) {
-        Write-Host "neither a bugalizer Docker container nor a Bugalizer Windows service was found" -ForegroundColor Yellow
+        Write-Host ("neither a bugalizer Docker container nor a Windows service matching '{0}' was found (pass -ServiceName if the service is registered under another name)" -f $ServiceName) -ForegroundColor Yellow
     }
 }
 

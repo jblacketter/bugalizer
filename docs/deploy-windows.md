@@ -148,9 +148,12 @@ It prints, and its output is the post-merge acceptance record for a phase:
 - **Auth.** `auth_enabled` from `/health`. `false` means `BUGALIZER_API_KEYS`
   is empty; fix that before the service is reachable from the LAN. A service
   that omits the field predates Phase 7 and is reported as unknown.
-- **Ollama** reachability and which deploy option (Docker container or NSSM
-  service) is active, with the container's image id and start time or the
-  service's state.
+- **Ollama** reachability and which deploy option is active: a bugalizer
+  Docker container (image id and start time) or a Windows service whose name
+  matches `*bugal*` (state and start time). That pattern covers the NSSM
+  recipe's `Bugalizer` and the LAN Service Manager's `lan-mgr-bugalizer`
+  style name; pass `-ServiceName <name-or-pattern>` for anything else. A
+  matching service that is not Running counts as a problem.
 
 Then run the full end-to-end check: see [`smoke-test.md`](smoke-test.md).
 
