@@ -6,7 +6,7 @@ AI-powered bug report processing server. Accepts structured bug reports via REST
 ## Quick Start
 ```bash
 uv sync --dev
-uv run pytest                # 190 tests, all should pass
+uv run pytest                # 201 tests, all should pass
 
 # Run the server
 BUGALIZER_DB_PATH=bugalizer.db uv run uvicorn bugalizer.main:app --port 8090
@@ -16,10 +16,12 @@ BUGALIZER_DB_PATH=bugalizer.db uv run uvicorn bugalizer.main:app --port 8090
 ## Project Structure
 ```
 src/bugalizer/
-  main.py          # FastAPI app entry point (serves dashboard at /)
+  main.py          # FastAPI app entry point (serves dashboard at /, assets at /static)
   config.py        # Pydantic BaseSettings (env: BUGALIZER_*)
   static/
-    dashboard.html # Self-contained queue dashboard (vanilla JS, fetch-polling)
+    index.html     # Queue dashboard shell (Control Room design, Slate/Mist themes)
+    styles.css     # Design system: tier colors (emerald=local/free, violet=cloud/paid)
+    app.js         # Board + drawer + modals (vanilla JS, 5s fetch-polling)
   auth.py          # API key auth (X-API-Key header)
   models.py        # Pydantic models + 13-state workflow engine
   db.py            # SQLite layer (schema + CRUD + retry_on_locked + migrations)
@@ -62,15 +64,21 @@ tests/
 - **Phase 2 (Local LLM Pipeline): COMPLETE** — Ollama triage, async queue worker, duplicate detection, token tracking (66 tests)
 - **Phase 3 (Codebase Analysis): COMPLETE** — Git ops, tree-sitter repo maps, two-pass localization, SHA freshness
 - **Phase 4 (Fix Proposals): COMPLETE (codex-approved)** — Anthropic-via-litellm stage generates unified-diff fix proposals with prompt caching; `FIX_PROPOSING` transient claim state; SHA-freshness gate before paid calls; `GET /reports/{id}/fix_proposals` endpoint.
-- **Phase 5 (Deployment Readiness + Dashboard): IN PROGRESS** — see `docs/phases/phase-5-deployment-readiness.md`
-  - Cycle 1 (5.1 retry gates + 5.2 security defaults): COMPLETE (codex-approved)
-  - Cycle 2 (5.3 per-report `analysis_mode`, `POST /reports/{id}/analyze`, per-project `fix_llm_*` provider split): COMPLETE (codex-approved)
-  - Cycle 3 (5.4 queue dashboard at `/`, reports list pagination, `GET /reports/{id}/analyses`): COMPLETE (codex-approved)
-  - Cycle 4 (5.5 packaging: Dockerfile/compose, NSSM recipe, `docs/deploy-windows.md`, `docs/smoke-test.md`, `.env` file support in Settings): IMPLEMENTED — awaiting review; real-hardware smoke test on the Windows box still pending
+- **Phase 5 (Deployment Readiness + Dashboard): COMPLETE** — all 4 cycles codex-approved;
+  hosting milestone closed 2026-07-02 (live at `https://bugalizer.lan/` on the Windows GPU box)
+- **Phase 5b (Dashboard UX & Tier Clarity): IN PROGRESS** — see `docs/phases/phase-5b-dashboard-ux.md`
+  - Cycle 1 (5b.1 tier identity + 5b.2 readable results): COMPLETE (codex-approved) — static split
+    to `index.html`/`styles.css`/`app.js`, Slate/Mist themes, tier scan-state chips, formatted
+    triage, colorized diffs, run-history timeline; per-thread SQLite connections crash fix
+  - Cycle 2 (5b.3 ops visibility + 5b.4 UI workflows): IMPLEMENTED — health LEDs, filters,
+    terminal collapse, project management modal, bug submission form, retry-only-when-failed
 - Phase 6 (Integrations): NOT STARTED
 
 ## Handoff Workflow
-Uses ai-handoff system: claude (lead) ↔ codex (reviewer). Run `/handoff` to check state.
+Uses tagteam: claude (lead) ↔ codex (reviewer). Read `tagteam.yaml` and `handoff-state.json`,
+then follow the handoff contract: `/tagteam:handoff` (Claude Code plugin) or `tagteam contract`.
+See `AGENTS.md` and `docs/workflows.md`. The old vendored `.claude/skills/handoff/` is gone;
+the plugin serves the skill.
 
 ## Dev Environment
 - Python 3.12.11+ with `uv`
@@ -98,4 +106,4 @@ Uses ai-handoff system: claude (lead) ↔ codex (reviewer). Run `/handoff` to ch
 - `/review` — Pre-submission code review checklist
 - `/pii-scan` — PII data flow audit and regulatory compliance check
 - `/security-check` — OWASP-based security audit
-- `/handoff` — AI handoff workflow (claude ↔ codex)
+- `/tagteam:handoff` — AI handoff workflow (claude ↔ codex), served by the tagteam plugin

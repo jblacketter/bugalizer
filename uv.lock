@@ -214,7 +214,7 @@ dev = [
     { name = "httpx2", specifier = ">=0.1" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
-    { name = "tagteam", specifier = ">=0.7.0" },
+    { name = "tagteam", specifier = ">=3.12.0" },
 ]
 
 [[package]]
@@ -1578,14 +1578,14 @@ wheels = [
 
 [[package]]
 name = "tagteam"
-version = "0.7.0"
+version = "3.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9b/00/7d3c31cbd25e07450211c2a25a79aaee3eb8cc6dcdae9857bc90fced698d/tagteam-0.7.0.tar.gz", hash = "sha256:b0885224f01d34af409cd13cf806285bdf8dee7e77cd737d0d12d7777d9f140f", size = 277465, upload-time = "2026-05-03T15:00:42.373Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c8/d7/66cd5f0f000e19d7f77926fc8500ef9cfc1b838e3a6405519037f10a94a2/tagteam-3.12.0.tar.gz", hash = "sha256:ced98d1978f5804cf9ed378bc233d52643f759ec0a203e724f8801cdc74463ad", size = 722481, upload-time = "2026-09-09T18:37:55.559Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/82/25/a5f4d3e7d3199c53ecea834de98343c4f4415d3c4e7be00a9e50eef02d34/tagteam-0.7.0-py3-none-any.whl", hash = "sha256:1d71ea733a3efb8d29a1e1d33db5c978b904d035ec7240456d4130448d6eb287", size = 232702, upload-time = "2026-05-03T15:00:40.56Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/79/3ce1d8f8eeab2c138e797481f88cac8a2611a5cd8efd78f16111a861a19c/tagteam-3.12.0-py3-none-any.whl", hash = "sha256:47609e0dbddf08754945edcd6ca110ca2533b01eacbb04d48f1a4123b656097d", size = 506667, upload-time = "2026-09-09T18:37:54.028Z" },
 ]
 
 [[package]]

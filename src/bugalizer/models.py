@@ -188,6 +188,10 @@ class BugReportResponse(BaseModel):
     # True when the report has at least one completed localization (i.e. it has
     # been analyzed locally) — lets the dashboard flag analyzed cards at a glance.
     localized: bool = False
+    # Latest completed analysis per tier (§5b.1 scan-state chips): local =
+    # ollama, cloud = any other provider (paid). Null when that tier never ran.
+    last_local_analysis_at: Optional[str] = None
+    last_cloud_analysis_at: Optional[str] = None
 
 
 class BugReportListResponse(BaseModel):

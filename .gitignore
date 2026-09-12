@@ -36,6 +36,9 @@ repos/
 .env
 .env.local
 
+# Tagteam runtime session state (recreated per session)
+.handoff-session.json
+
 # Pytest
 .pytest_cache/
 htmlcov/
@@ -43,3 +46,6 @@ htmlcov/
 
 # Build artifacts
 *.whl
+
+# Tagteam runtime state (db + write lock, recreated per session)
+.tagteam/

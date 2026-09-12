@@ -12,6 +12,7 @@ import httpx
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from bugalizer import __version__
 from bugalizer.config import settings
@@ -94,12 +95,18 @@ def create_app() -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     async def dashboard() -> FileResponse:
-        """Serve the queue dashboard (§5.4) — one self-contained static page.
+        """Serve the queue dashboard (§5.4/§5b).
 
         The page itself needs no auth; every API call it makes carries the
-        X-API-Key the user enters (stored in browser localStorage).
+        X-API-Key the user enters (stored in browser localStorage). Its CSS/JS
+        load from the /static mount below, by absolute path so links resolve
+        behind the LAN reverse proxy too.
         """
-        return FileResponse(_STATIC_DIR / "dashboard.html", media_type="text/html")
+        return FileResponse(_STATIC_DIR / "index.html", media_type="text/html")
+
+    # Dashboard assets (§5b file split). Unauthenticated like the page itself —
+    # they carry no secrets; the API key travels per-request from the browser.
+    app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
     @app.get("/health/live", tags=["meta"])
     async def liveness() -> dict[str, str]:

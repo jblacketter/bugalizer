@@ -224,7 +224,7 @@ This project uses an AI handoff workflow between Claude (lead) and Codex (review
 | `/review` | Pre-submission code review checklist |
 | `/pii-scan` | PII data flow audit |
 | `/security-check` | OWASP-based security audit |
-| `/handoff` | AI handoff workflow |
+| `/tagteam:handoff` | AI handoff workflow (tagteam plugin; `tagteam contract` prints the same) |
 
 ## License
 

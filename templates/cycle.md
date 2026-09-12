@@ -4,8 +4,8 @@
 - **Phase:** [phase name]
 - **Type:** [plan|impl]
 - **Started:** [YYYY-MM-DD]
-- **Lead:** claude
-- **Reviewer:** codex
+- **Lead:** Lead (read current tagteam.yaml)
+- **Reviewer:** Reviewer (read current tagteam.yaml)
 
 ## Reference
 - Plan: `docs/phases/[phase].md`

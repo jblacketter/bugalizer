@@ -16,7 +16,7 @@ from bugalizer.db import init_db
 def fresh_db():
     """Re-init the DB before each test."""
     from bugalizer import db
-    db._conn = None
+    db.reset_conn()
     os.environ["BUGALIZER_DB_PATH"] = ":memory:"
     from bugalizer.config import settings
     settings.db_path = ":memory:"
@@ -326,13 +326,86 @@ def test_list_report_analyses_endpoint():
 # ---------------------------------------------------------------------------
 
 def test_dashboard_served_at_root():
-    """GET / serves the self-contained dashboard page, no auth required for
-    the static page itself (its API calls carry the key)."""
+    """GET / serves the dashboard page, no auth required for the static page
+    itself (its API calls carry the key). §5b split: the page references its
+    CSS/JS under the /static mount."""
     r = client.get("/")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
     assert "Bugalizer" in r.text
     assert "X-API-Key" in r.text  # the page wires the key header
+    assert "/static/styles.css" in r.text
+    assert "/static/app.js" in r.text
+
+
+def test_dashboard_static_assets_resolve():
+    """§5b link integrity: every /static href/src in the served HTML must be
+    fetchable with the right content type — catches broken links after the
+    dashboard.html → index.html/styles.css/app.js split (and future renames)."""
+    import re
+
+    html = client.get("/").text
+    links = re.findall(r'(?:href|src)="(/static/[^"]+)"', html)
+    assert len(links) >= 2  # at least the stylesheet and the script
+
+    expected_types = {".css": ("text/css",), ".js": ("text/javascript", "application/javascript")}
+    for link in links:
+        r = client.get(link)
+        assert r.status_code == 200, f"{link} did not resolve"
+        suffix = "." + link.rsplit(".", 1)[-1]
+        allowed = expected_types.get(suffix)
+        if allowed:
+            assert r.headers["content-type"].startswith(allowed), (
+                f"{link}: unexpected content-type {r.headers['content-type']}"
+            )
+
+
+def test_list_reports_includes_tier_summary():
+    """§5b.1 scan-state chips: list rows carry last_local_analysis_at /
+    last_cloud_analysis_at, derived from completed analyses by provider
+    (ollama = local; anything else = cloud). Failed/incomplete rows and
+    rows without a completed_at don't count."""
+    from bugalizer.db import analysis_create
+
+    pid = _create_project().json()["id"]
+    rid = _create_report(pid).json()["id"]
+
+    # Nothing completed yet — both null.
+    row = next(x for x in client.get("/api/v1/reports").json()["reports"] if x["id"] == rid)
+    assert row["last_local_analysis_at"] is None
+    assert row["last_cloud_analysis_at"] is None
+
+    analysis_create(
+        bug_report_id=rid, phase="triage", status="completed",
+        llm_provider="ollama", llm_model="qwen2.5-coder:7b",
+        completed_at="2026-01-01T00:00:00+00:00",
+    )
+    analysis_create(  # later local run wins the MAX
+        bug_report_id=rid, phase="localization", status="completed",
+        llm_provider="ollama", llm_model="qwen2.5-coder:7b",
+        completed_at="2026-01-02T00:00:00+00:00",
+    )
+    analysis_create(  # failed cloud run must NOT count as a cloud scan
+        bug_report_id=rid, phase="fix", status="failed",
+        llm_provider="anthropic", llm_model="claude-sonnet-5",
+        completed_at="2026-01-03T00:00:00+00:00",
+    )
+
+    row = next(x for x in client.get("/api/v1/reports").json()["reports"] if x["id"] == rid)
+    assert row["last_local_analysis_at"] == "2026-01-02T00:00:00+00:00"
+    assert row["last_cloud_analysis_at"] is None
+
+    analysis_create(
+        bug_report_id=rid, phase="fix", status="completed",
+        llm_provider="anthropic", llm_model="claude-sonnet-5",
+        completed_at="2026-01-04T00:00:00+00:00",
+    )
+    # Both the list row and the single-report detail carry the summary.
+    row = next(x for x in client.get("/api/v1/reports").json()["reports"] if x["id"] == rid)
+    assert row["last_cloud_analysis_at"] == "2026-01-04T00:00:00+00:00"
+    detail = client.get(f"/api/v1/reports/{rid}").json()
+    assert detail["last_local_analysis_at"] == "2026-01-02T00:00:00+00:00"
+    assert detail["last_cloud_analysis_at"] == "2026-01-04T00:00:00+00:00"
 
 
 def test_get_report():

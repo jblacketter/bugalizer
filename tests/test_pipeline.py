@@ -19,7 +19,7 @@ from bugalizer.llm.client import LLMResponse
 @pytest.fixture(autouse=True)
 def fresh_db():
     from bugalizer import db
-    db._conn = None
+    db.reset_conn()
     os.environ["BUGALIZER_DB_PATH"] = ":memory:"
     from bugalizer.config import settings
     settings.db_path = ":memory:"
