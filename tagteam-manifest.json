@@ -1,0 +1,67 @@
+{
+  "files": {
+    "docs/checklists/code_review.md": {
+      "sha256": "991440cc65dff18fd2a3426a1dabe5e50609e7fb8308afa1abe311d5d286e35a",
+      "source": "checklists/code_review.md",
+      "tagteam": "3.13.0.dev0"
+    },
+    "docs/checklists/plan_review.md": {
+      "sha256": "2fa0cf91a311503b37dc3f479621b7371b8e3889866d75b437a0770f8677115d",
+      "source": "checklists/plan_review.md",
+      "tagteam": "3.13.0.dev0"
+    },
+    "templates/cycle.md": {
+      "sha256": "7c7399f4fc07a51577af0764fdc44ea3cfc3410e5dab2ee5577d51793cde31d2",
+      "source": "templates/cycle.md",
+      "tagteam": "3.13.0.dev0"
+    },
+    "templates/decision_log.md": {
+      "sha256": "8207948d87503f29c1b05e23e734557c1c574a9ff2f88b5a13fa78309298f25f",
+      "source": "templates/decision_log.md",
+      "tagteam": "3.13.0.dev0"
+    },
+    "templates/feedback.md": {
+      "sha256": "8e8fe6c52ba499a4236947ca15356cf3fb314f00f74a8106e67c8dac7a6ffc36",
+      "source": "templates/feedback.md",
+      "tagteam": "3.13.0.dev0"
+    },
+    "templates/handoff_impl.md": {
+      "sha256": "681cbcdf57fc8535c8d2acd3d285e47a31bd860e165d5d5d1fc669d6cd5e0b7b",
+      "source": "templates/handoff_impl.md",
+      "tagteam": "3.13.0.dev0"
+    },
+    "templates/handoff_plan.md": {
+      "sha256": "c026a1730138a1db89b0cabd952de7a23f5b3377eccd00bdf8d9ea2f06d4692d",
+      "source": "templates/handoff_plan.md",
+      "tagteam": "3.13.0.dev0"
+    },
+    "templates/implementation_log.md": {
+      "sha256": "5066e6c75d8b55338e6356a7992de65307b4c6b361090ad39398be84762be222",
+      "source": "templates/implementation_log.md",
+      "tagteam": "3.13.0.dev0"
+    },
+    "templates/phase_plan.md": {
+      "sha256": "8ad9df5c15328aa4e1687f508842ea8ce403e980b04a01bfca6b88fc6e31efd7",
+      "source": "templates/phase_plan.md",
+      "tagteam": "3.13.0.dev0"
+    },
+    "templates/requirements_brief.md": {
+      "sha256": "91c7dc0e462cd1c36617983438d50ac82dc4c720432b9e34a8ab1fa32cda6fc7",
+      "source": "templates/requirements_brief.md",
+      "tagteam": "3.13.0.dev0"
+    },
+    "templates/roadmap.md": {
+      "sha256": "d34f653dd52a685fff9785c56819f45c88edebd32820b4327324193ddb05ad84",
+      "source": "templates/roadmap.md",
+      "tagteam": "3.13.0.dev0"
+    },
+    "templates/sync_state.md": {
+      "sha256": "173227fa6cbf54d936f25c906b00848245e8bc18d15279c2a1b8fe590fee9066",
+      "source": "templates/sync_state.md",
+      "tagteam": "3.13.0.dev0"
+    }
+  },
+  "schema": 1,
+  "tagteam": "3.13.0.dev0",
+  "written_at": "2026-09-15T23:40:31+00:00"
+}
