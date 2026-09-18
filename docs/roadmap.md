@@ -118,6 +118,29 @@ tree-sitter / uv
   Steps: [`docs/open-pr-acceptance.md`](open-pr-acceptance.md); BOWIE prep:
   [`docs/bowie-open-pr-prep.md`](bowie-open-pr-prep.md); report (2026-09-17):
   [`docs/bowie-open-pr-prep-report.md`](bowie-open-pr-prep-report.md).
+- **Acceptance prerequisites (open, 2026-09-18):**
+  1. **Token from Dan** (Part A of `open-pr-acceptance.md`) into BOWIE's
+     `.env` as `BUGALIZER_GITHUB_TOKEN` (key name now fixed on BOWIE; it was
+     misspelled `BUGALYZER_`). Then restart; `/health` `github_configured: true`.
+  2. **A proposal whose diff applies to current sonicgrid `main`.** The only
+     candidate (report `f8c0a9dbbe304f93`, sonicgrid#100) is unusable: the bug
+     is already fixed upstream and the proposal edits a file that does not
+     exist. Pick or file a bug that reproduces on current `main` and names a
+     concrete component or file.
+  3. **Stage 4 model: Greg's call.** BOWIE runs `BUGALIZER_FIX_PROVIDER=ollama`
+     (`qwen2.5-coder:14b`), so "Analyze (cloud)" is local and free, and on the
+     Next.js tree it invented files and libraries. A fresh bug alone may not
+     fix that. Options: one paid cloud Stage 4 run (set
+     `BUGALIZER_ANTHROPIC_API_KEY`, or the Phase 7 per-request key override),
+     or accept several local attempts. Also worth setting the sonicgrid
+     project's local `llm_model` to `qwen2.5-coder:14b` (it uses the `7b`
+     default) to improve localization.
+  4. Optional negative check once the token is set: run open-pr on the bad
+     proposal first; expect `409 diff_does_not_apply` and no branch on GitHub.
+  5. Then the walk: `open-pr-smoke.ps1 -ReportId <id>`; record the output here.
+  The BOWIE sonicgrid clone (project `3e300658671b445e`) was made from the
+  local checkout, because Bugalizer cannot clone a private repo (Phase 9).
+  Refresh it the same way until Phase 9 lands.
 - **Description:** Turn a `fix_proposed` report into a pull request on the
   project's GitHub repo: apply the stored diff in a throwaway worktree on
   `fix/bugalizer-<report-id>`, commit, push, open the PR with the analysis as
@@ -132,6 +155,25 @@ tree-sitter / uv
     URL, argv, git config, log or response
   - `scripts/windows/open-pr-smoke.ps1` for the BOWIE acceptance walk
 - **Depends on:** Phase 7
+
+### Phase 9: private-repo-access (proposed)
+- **Status:** Proposed 2026-09-18, not queued; starts on Greg's call. Should
+  land before or alongside B1, which needs a clone that stays current.
+- **Description:** `POST /projects/{id}/clone`, `git pull` in the pipeline and
+  `refresh-map` go through `origin` with no credentials, so a private repo
+  (sonicgrid) cannot be cloned or refreshed; on BOWIE it was cloned by hand
+  from a local checkout. Reuse open-pr's env-only credential
+  (`BUGALIZER_GITHUB_TOKEN`, `GIT_CONFIG_*` extraheader, empty
+  `credential.helper`, canonical HTTPS URL, never in URL/argv/config/logs)
+  for clone and fetch/pull of GitHub projects.
+- **Key Deliverables (sketch):** authenticated clone and update against the
+  canonical URL; token secrecy tests matching Phase 8's; a hand-made clone
+  whose `origin` is SSH or a local path keeps working; no change for public
+  repos without a token.
+- **Open question:** the Phase 8 token is scoped to one repo. Per-project
+  tokens (`credential_env` like the ingest seam) only matter if a second
+  private repo appears.
+- **Depends on:** Phase 8 (credential code), Dan's token for acceptance
 
 ## Decision Log
 See `docs/decision_log.md`
