@@ -91,7 +91,7 @@ tree-sitter / uv
     commit, push, open a PR with the analysis as the body; unlock
     fix_approved and fix_committed; write policy tested (never main, never
     force, one PR per report). The only place that writes to a remote.
-    Depends on Phase 7.
+    Depends on Phase 7. Runs as Phase 8 below.
 - **Depends on:** Phase 7
 
 ### Phase 7: bugalizer-revive (B0)
@@ -110,6 +110,25 @@ tree-sitter / uv
   - `projects.ingest_source` / `ingest_config`
   - `scripts/windows/check-service.ps1`
 - **Depends on:** Phase 5b
+
+### Phase 8: open-pr (B2)
+- **Status:** Plan approved 2026-09-17 (codex, round 3); implementation in
+  review (`docs/phases/open-pr.md`). Acceptance (Greg, post-merge, BOWIE):
+  `open-pr-smoke.ps1` on one real sonicgrid report; not yet run.
+- **Description:** Turn a `fix_proposed` report into a pull request on the
+  project's GitHub repo: apply the stored diff in a throwaway worktree on
+  `fix/bugalizer-<report-id>`, commit, push, open the PR with the analysis as
+  the body. Unlocks `fix_approved` and `fix_committed` for this path only. The
+  only code in Bugalizer that writes to a remote; the Aegis button is A2.
+- **Key Deliverables:**
+  - `POST /reports/{id}/open-pr`, idempotent per report (second call returns the
+    existing PR)
+  - Write policy enforced by tests: never the default branch, never force, one
+    branch and one PR per report, never merge
+  - `BUGALIZER_GITHUB_TOKEN` (fine-grained, single repo) that never reaches a
+    URL, argv, git config, log or response
+  - `scripts/windows/open-pr-smoke.ps1` for the BOWIE acceptance walk
+- **Depends on:** Phase 7
 
 ## Decision Log
 See `docs/decision_log.md`

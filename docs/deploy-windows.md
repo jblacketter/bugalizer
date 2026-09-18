@@ -25,7 +25,9 @@ other LAN apps ──HTTP──▶ Bugalizer :8090 ──▶ Ollama :11434 (nati
    confirm in Task Manager ▸ Startup apps.
 
 2. **Git for Windows** (native deploys only; the Docker image bundles git) —
-   needed by the repo clone/pull pipeline stage.
+   needed by the repo clone/pull pipeline stage. **Git 2.29 or later** is
+   required by open-pr (§7b): it fetches with `--no-write-fetch-head`, and an
+   older git makes the endpoint answer `502 github_error` rather than fall back.
 
 ## 2. Configuration (`.env`)
 
@@ -45,6 +47,14 @@ Edit `.env` and set at minimum:
   they can be revoked independently.)
 
 - `BUGALIZER_ANTHROPIC_API_KEY` — required for Stage 4 fix proposals.
+
+- `BUGALIZER_GITHUB_TOKEN` — required for open-pr (§7b). A **fine-grained**
+  personal access token: *Repository access* = only `spherop/sonicgrid`;
+  *Permissions* = **Contents: Read and write** and **Pull requests: Read and
+  write**, nothing else. The single-repo scope is the blast-radius limit: the
+  service cannot push anywhere else even if a project row points elsewhere.
+  Unset = the endpoint answers `503 github_not_configured`; `/health` shows
+  `github_configured`.
 
 Everything else has sane LAN defaults (see the comments in `.env.example`).
 The app reads `.env` from its working directory on startup; real environment
@@ -186,6 +196,49 @@ curl -s -X POST $HOST/api/v1/reports -H "X-API-Key: $KEY" \
 ```
 
 Full API reference: `http://<lan-host>:8090/docs`.
+
+## 7b. Opening a PR from a fix proposal (Phase 8)
+
+`POST /api/v1/reports/{id}/open-pr` turns a `fix_proposed` report into a pull
+request on the project's GitHub repo: it applies the proposal's diff to the
+fetched default branch in a throwaway worktree, pushes
+`fix/bugalizer-<report-id>`, and opens a PR (not a draft) with the analysis as
+the body. The call is the approval (`fix_proposed -> fix_approved ->
+fix_committed`). **A human merges on GitHub; Bugalizer never merges, never
+force-pushes, never touches the default branch, and never touches the analysis
+clone's checkout, branches or `origin`.** Optional body:
+`{"fix_proposal_id": "<id>"}` (default: the newest proposal).
+
+It is idempotent per report: a repeat answers `200` with the same PR. Other
+answers carry `{code, detail}`:
+
+| code | meaning / what to do |
+|------|----------------------|
+| `diff_does_not_apply` (409) | The default branch moved under the proposal. Nothing was pushed; re-run the analysis if you still want a fix. |
+| `pr_exists` (409) | The report already has a PR, opened from the proposal named in the answer. One PR per report. |
+| `branch_exists` (409) | `fix/bugalizer-<id>` is on GitHub and Bugalizer cannot prove it pushed it. See below. |
+| `pr_unattributed` (409) | A PR exists for the branch but its commits do not say which proposal it implements. Call again with `{"fix_proposal_id": ...}`. |
+| `in_progress` (409) | Another open-pr call for this report is running. |
+| `github_error` (502) | GitHub or git failed (includes git older than 2.29). The report is back at `fix_proposed`; retry. |
+
+**`branch_exists` recovery.** The service never overwrites a branch it did not
+push. If the push landed but the PR request failed, the next call recognises
+the branch (recorded push) and just opens the PR. Otherwise (a hand-made
+branch, or a push whose record was lost) pick one:
+
+1. Open the PR by hand on GitHub from that branch, then call open-pr again.
+   If the branch's commits carry Bugalizer's `Bugalizer-Report` /
+   `Bugalizer-Proposal` trailers, the PR is recorded automatically.
+2. If the call then answers `pr_unattributed`, call again naming the proposal
+   the PR implements: `{"fix_proposal_id": "<id>"}`.
+3. Or delete the remote branch on GitHub and call open-pr again.
+
+Acceptance walk (one real report, prints both calls; the second must show the
+same PR with `created: false`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\open-pr-smoke.ps1 -ReportId <report_id>
+```
 
 ## 8. Backups
 

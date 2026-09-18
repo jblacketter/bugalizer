@@ -54,7 +54,9 @@ VALID_TRANSITIONS: dict[BugStatus, set[BugStatus]] = {
     BugStatus.CLARIFICATION_NEEDED: {BugStatus.ANALYZING, BugStatus.CLOSED},
     BugStatus.FIX_PROPOSING: {BugStatus.FIX_PROPOSED, BugStatus.TRIAGED},
     BugStatus.FIX_PROPOSED: {BugStatus.FIX_APPROVED, BugStatus.TRIAGED, BugStatus.CLOSED},
-    BugStatus.FIX_APPROVED: {BugStatus.FIX_COMMITTED},
+    # Phase 8: fix_approved is the open-pr claim; a failed attempt returns
+    # the report to fix_proposed (entered by the endpoint only, never by hand).
+    BugStatus.FIX_APPROVED: {BugStatus.FIX_COMMITTED, BugStatus.FIX_PROPOSED},
     BugStatus.FIX_COMMITTED: {BugStatus.VERIFIED, BugStatus.TRIAGED},
     BugStatus.VERIFIED: {BugStatus.CLOSED},
     BugStatus.DEFERRED: {BugStatus.TRIAGED},
@@ -70,7 +72,9 @@ VALID_TRANSITIONS: dict[BugStatus, set[BugStatus]] = {
 # Phase 2: adds analyzing, clarification_needed (local LLM pipeline).
 # Phase 4: unlocks fix_proposing (transient claim) + fix_proposed
 #          (terminal-within-phase). Still gated: fix_approved, fix_committed,
-#          verified (future Dashboard phase).
+#          verified. Phase 8's POST /reports/{id}/open-pr enters fix_approved
+#          and fix_committed with enforce_phase_gating=False; they stay out of
+#          this set so PATCH /status can never enter them by hand.
 CURRENT_PHASE_TARGETS: set[BugStatus] = {
     BugStatus.VALIDATING,
     BugStatus.TRIAGED,
@@ -85,6 +89,13 @@ CURRENT_PHASE_TARGETS: set[BugStatus] = {
 }
 
 
+# Claim states owned by an internal operation. A gated (public) transition
+# may never leave them: only the claim's owner moves the report on, by token
+# CAS. fix_approved is the open-pr claim (Phase 8); its rollback to
+# fix_proposed is valid internally but never through PATCH /status.
+CLAIM_STATUSES: set[BugStatus] = {BugStatus.FIX_APPROVED}
+
+
 def validate_transition(
     current: BugStatus,
     target: BugStatus,
@@ -94,12 +105,15 @@ def validate_transition(
     """Return True if the transition from current to target is valid.
 
     When enforce_phase_gating is True (default), also checks that the target
-    status is in the current phase's allowed set.
+    status is in the current phase's allowed set and that the source is not
+    an internal claim state (CLAIM_STATUSES).
     """
     allowed = VALID_TRANSITIONS.get(current, set())
     if target not in allowed:
         return False
-    if enforce_phase_gating and target not in CURRENT_PHASE_TARGETS:
+    if enforce_phase_gating and (
+        target not in CURRENT_PHASE_TARGETS or current in CLAIM_STATUSES
+    ):
         return False
     return True
 
@@ -261,6 +275,26 @@ class AnalyzeResponse(BaseModel):
     # Cloud tier only: where the provider/model came from
     # (`request`, `project`, `global`). Null for the local tier.
     llm_source: Optional[str] = None
+
+
+class OpenPrRequest(BaseModel):
+    """Optional body for POST /reports/{id}/open-pr (Phase 8).
+
+    Only the proposal can be chosen; the branch name is computed server-side
+    and extra fields are refused.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    fix_proposal_id: Optional[str] = Field(None, min_length=1, max_length=100)
+
+
+class OpenPrResponse(BaseModel):
+    """201 (opened) or 200 (already open) answer from the open-pr endpoint."""
+    pr_url: str
+    pr_number: int
+    branch: str
+    fix_proposal_id: str
+    created: bool
 
 
 # ---------------------------------------------------------------------------

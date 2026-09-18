@@ -6,6 +6,42 @@ This log tracks important decisions made during the project.
 
 ---
 
+## 2026-09-17: Open-PR write policy and the single-process claim (Phase 8 / B2)
+
+**Decision:** `POST /reports/{id}/open-pr` is the only code that writes to a remote, under a
+tested write policy: the branch is always `fix/bugalizer-<report-id>` (server-computed); a guard
+refuses the default branch and unprefixed refs; no force flag or `+` refspec on any fetch, push
+or ref update; the commit is built detached in a throwaway worktree (no local branch, analysis
+clone untouched); one branch and one PR per report, looked up (DB, then GitHub) before any
+apply, commit or push; never merge. Every remote command names the canonical
+`https://github.com/<owner>/<repo>.git` with an env-only credential, never `origin`.
+Arbiter rulings (Greg, 2026-09-17): **R1** one fine-grained GitHub token in the service env
+(`BUGALIZER_GITHUB_TOKEN`, single repo, Contents + Pull requests); **R2** a diff that no longer
+applies fails as `409 diff_does_not_apply` and never triggers re-analysis; **R3** the branch is
+built in a throwaway worktree, never in the analysis clone.
+
+**Single-process assumption.** `fix_approved` is the claim, owned by a `claim_token` written
+by compare-and-set. A request in flight registers its token in an in-process registry; a
+`fix_approved` report whose token is not registered has lost its owner (process death, failed
+rollback) and the next call adopts it by a CAS on the observed token. This is correct only
+while one Bugalizer process serves a database, which `architecture.md` already requires
+(single node; `--workers > 1` is unsupported because of the queue worker). Any future
+multi-process deployment must replace the registry with a lease before it ships.
+
+**Context:** B2 of the Aegis direction record (D4: "Open PR" is branch-only; a human merges).
+
+**Alternatives Considered:**
+- Build the branch in the analysis clone: mutates the checkout the pipeline reads (rejected, R3).
+- GitHub App auth: more setup than one single-repo token for one repo; a later phase if needed.
+- Time-based claim leases: need a clock policy and still misjudge slow calls; unnecessary in a
+  single process.
+
+**Decided By:** Greg (R1-R3) + claude (plan) + codex (APPROVE, open-pr plan round 3)
+
+**Phase:** 8
+
+---
+
 ## 2026-09-12: Two seams for the Aegis arc (Phase 7 / B0)
 
 **Decision:** (1) The cloud tier accepts a per-request `llm` override (provider, model,
