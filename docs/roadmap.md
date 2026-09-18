@@ -115,7 +115,8 @@ tree-sitter / uv
 - **Status:** Implemented, codex-approved 2026-09-18 (impl round 3), merged
   2026-09-18 (PR #5, `5e7caab`). **Acceptance pending:** blocked on the
   `spherop/sonicgrid` token, which only the repo owner (Dan) can issue.
-  Steps: [`docs/open-pr-acceptance.md`](open-pr-acceptance.md).
+  Steps: [`docs/open-pr-acceptance.md`](open-pr-acceptance.md); BOWIE prep:
+  [`docs/bowie-open-pr-prep.md`](bowie-open-pr-prep.md).
 - **Description:** Turn a `fix_proposed` report into a pull request on the
   project's GitHub repo: apply the stored diff in a throwaway worktree on
   `fix/bugalizer-<report-id>`, commit, push, open the PR with the analysis as
