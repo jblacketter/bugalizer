@@ -228,9 +228,17 @@ def update_report_status(
         # For terminal states, resolution_reason is recommended but not required.
         pass
 
+    # CAS on the validated status: if the row moved in between (an open-pr
+    # claim, a pipeline stage), refuse instead of overwriting it.
     updated = report_update_status(
-        report_id, target.value, resolution_reason=body.resolution_reason
+        report_id, target.value, resolution_reason=body.resolution_reason,
+        expected_status=current.value,
     )
+    if updated is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Report status changed during the update; re-read and retry",
+        )
     return StatusUpdateResponse(
         id=report_id,
         previous_status=current.value,
@@ -497,9 +505,20 @@ def delete_report(
 
     Refused (409) while an open-pr request holds the report's claim.
     """
+    row = report_get(report_id)
+    if not row or row.get("resolution_reason") == "deleted":
+        raise HTTPException(status_code=404, detail="Bug report not found")
     if open_pr_running(report_id):
         raise HTTPException(
             status_code=409, detail="An open-pr request for this report is running"
         )
-    if not report_delete(report_id):
-        raise HTTPException(status_code=404, detail="Bug report not found")
+    # CAS on what was just checked, so a claim taken in between survives.
+    if not report_delete(
+        report_id,
+        expected_status=row["status"],
+        expected_claim_token=row.get("claim_token"),
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Report changed during the delete; re-read and retry",
+        )

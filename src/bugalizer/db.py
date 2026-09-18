@@ -548,12 +548,23 @@ def report_count(
     return int(row["cnt"])
 
 
+_UNSET: Any = object()
+
+
 @retry_on_locked
 def report_update_status(
     report_id: str,
     new_status: str,
     resolution_reason: Optional[str] = None,
+    *,
+    expected_status: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
+    """Set a report's status.
+
+    With `expected_status` (public PATCH), the write is a compare-and-set on
+    the status the caller validated against; it returns None when the row
+    changed in between (e.g. open-pr claimed it), and nothing is written.
+    """
     conn = _get_conn()
     now = _now()
     fields = {"status": new_status, "updated_at": now}
@@ -561,27 +572,46 @@ def report_update_status(
         fields["resolution_reason"] = resolution_reason
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [report_id]
-    conn.execute(f"UPDATE bug_reports SET {set_clause} WHERE id = ?", values)
+    where = "id = ?"
+    if expected_status is not None:
+        where += " AND status = ?"
+        values.append(expected_status)
+    cursor = conn.execute(f"UPDATE bug_reports SET {set_clause} WHERE {where}", values)
     conn.commit()
+    if expected_status is not None and cursor.rowcount != 1:
+        return None
     return report_get(report_id)
 
 
-def report_delete(report_id: str) -> bool:
-    """Soft-delete a report by setting status to 'rejected' with resolution_reason 'deleted'."""
+def report_delete(
+    report_id: str,
+    *,
+    expected_status: Optional[str] = None,
+    expected_claim_token: Any = _UNSET,
+) -> bool:
+    """Soft-delete a report by setting status to 'rejected' with resolution_reason 'deleted'.
+
+    One conditional UPDATE. With `expected_status` / `expected_claim_token`
+    (the public DELETE route), it only applies if the row still has the
+    status and claim token the caller checked, so an open-pr claim taken in
+    between is never overwritten. Returns False when nothing was deleted.
+    """
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT 1 FROM bug_reports WHERE id = ? AND (resolution_reason IS NULL OR resolution_reason != 'deleted')",
-        (report_id,),
-    ).fetchone()
-    if not row:
-        return False
-    now = _now()
-    conn.execute(
-        "UPDATE bug_reports SET status = 'rejected', resolution_reason = 'deleted', updated_at = ? WHERE id = ?",
-        (now, report_id),
+    where = "id = ? AND (resolution_reason IS NULL OR resolution_reason != 'deleted')"
+    params: list[Any] = [_now(), report_id]
+    if expected_status is not None:
+        where += " AND status = ?"
+        params.append(expected_status)
+    if expected_claim_token is not _UNSET:
+        where += " AND claim_token IS ?"
+        params.append(expected_claim_token)
+    cursor = conn.execute(
+        "UPDATE bug_reports SET status = 'rejected', resolution_reason = 'deleted', "
+        f"updated_at = ? WHERE {where}",
+        params,
     )
     conn.commit()
-    return True
+    return cursor.rowcount == 1
 
 
 # ---------------------------------------------------------------------------

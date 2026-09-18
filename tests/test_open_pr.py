@@ -970,6 +970,54 @@ async def test_live_claim_cannot_be_patched_deleted_or_taken(h):
     assert h.pushes == 1 and h.pr_posts == 1
 
 
+@pytest.mark.parametrize("route", ["patch", "delete"])
+async def test_public_mutation_started_before_the_claim_cannot_overwrite_it(h, monkeypatch, route):
+    """PATCH / DELETE validate first, then pause right before their DB write;
+    open-pr claims the row in that window. The stale public write is refused
+    (409) and the open-pr owner still finalizes with one push and one PR."""
+    from bugalizer.api import reports as reports_api
+
+    report_id, _ = h.report()
+    public_entered, public_release = threading.Event(), threading.Event()
+    name = "report_update_status" if route == "patch" else "report_delete"
+    real = getattr(reports_api, name)
+
+    def held(*args, **kwargs):
+        public_entered.set()
+        assert public_release.wait(30)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(reports_api, name, held)
+    build_entered, build_release = threading.Event(), threading.Event()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+        url = f"/api/v1/reports/{report_id}"
+        if route == "patch":
+            public = asyncio.create_task(client.patch(f"{url}/status", json={"status": "triaged"}))
+        else:
+            public = asyncio.create_task(client.delete(url))
+        assert await asyncio.to_thread(public_entered.wait, 30)
+
+        h.block = ("fetch", build_entered, build_release)
+        owner = asyncio.create_task(client.post(f"{url}/open-pr"))
+        assert await asyncio.to_thread(build_entered.wait, 30)
+        token = pr_mod._active_claims[report_id]
+
+        public_release.set()
+        public_resp = await public
+        after_public = h.rows(report_id)["report"]
+        build_release.set()
+        owner_resp = await owner
+    h.responses.extend(r.text for r in (public_resp, owner_resp))
+
+    assert public_resp.status_code == 409, public_resp.text
+    assert after_public["status"] == "fix_approved" and after_public["claim_token"] == token
+    assert after_public["resolution_reason"] is None
+    assert owner_resp.status_code == 201, owner_resp.text
+    assert h.rows(report_id)["report"]["status"] == "fix_committed"
+    assert h.pushes == 1 and h.pr_posts == 1
+
+
 @pytest.mark.parametrize("command", ["apply", "push"])
 async def test_cancellation_waits_for_the_git_worker(h, command):
     """Cancelling a call while a git worker runs keeps the claim and the lock
