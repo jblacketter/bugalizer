@@ -112,9 +112,10 @@ tree-sitter / uv
 - **Depends on:** Phase 5b
 
 ### Phase 8: open-pr (B2)
-- **Status:** Plan approved 2026-09-17 (codex, round 3); implementation in
-  review (`docs/phases/open-pr.md`). Acceptance (Greg, post-merge, BOWIE):
-  `open-pr-smoke.ps1` on one real sonicgrid report; not yet run.
+- **Status:** Implemented, codex-approved 2026-09-18 (impl round 3), merged
+  2026-09-18 (PR #5, `5e7caab`). **Acceptance pending:** blocked on the
+  `spherop/sonicgrid` token, which only the repo owner (Dan) can issue.
+  Steps: [`docs/open-pr-acceptance.md`](open-pr-acceptance.md).
 - **Description:** Turn a `fix_proposed` report into a pull request on the
   project's GitHub repo: apply the stored diff in a throwaway worktree on
   `fix/bugalizer-<report-id>`, commit, push, open the PR with the analysis as

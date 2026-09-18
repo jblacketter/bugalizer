@@ -51,7 +51,10 @@ Edit `.env` and set at minimum:
 - `BUGALIZER_GITHUB_TOKEN` — required for open-pr (§7b). A **fine-grained**
   personal access token: *Repository access* = only `spherop/sonicgrid`;
   *Permissions* = **Contents: Read and write** and **Pull requests: Read and
-  write**, nothing else. The single-repo scope is the blast-radius limit: the
+  write**, nothing else (GitHub also adds the mandatory **Metadata:
+  Read-only**). Only the account that **owns** the repo can issue such a
+  token; a collaborator cannot. For `spherop/sonicgrid` that is Dan; see
+  [`open-pr-acceptance.md`](open-pr-acceptance.md). The single-repo scope is the blast-radius limit: the
   service cannot push anywhere else even if a project row points elsewhere.
   Unset = the endpoint answers `503 github_not_configured`; `/health` shows
   `github_configured`.

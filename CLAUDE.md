@@ -81,7 +81,7 @@ tests/
   cloud LLM override with key secrecy + `key_ref` attribution, ingest seam (`ingest_source`/`ingest_config`),
   `/health` `auth_enabled` + `revision`, CI, `scripts/windows/check-service.ps1`. Post-merge acceptance:
   the script reports VERIFIED on BOWIE.
-- **Phase 8 (open-pr, B2): IMPLEMENTED, in review**: `POST /reports/{id}/open-pr` turns a
+- **Phase 8 (open-pr, B2): MERGED 2026-09-18 (PR #5), acceptance pending** (token from repo owner; `docs/open-pr-acceptance.md`): `POST /reports/{id}/open-pr` turns a
   proposal into a PR on `fix/bugalizer-<id>` (never merge, never force, one PR per report);
   `BUGALIZER_GITHUB_TOKEN`; `scripts/windows/open-pr-smoke.ps1` for the BOWIE acceptance walk.
 
