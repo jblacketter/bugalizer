@@ -68,10 +68,25 @@ tree-sitter / uv
   each on Greg's call.
 - **Description:** Connect Bugalizer to sonicgrid and to Aegis.
 - **Key Deliverables:**
-  - B1 `sonicgrid-ingest`: Supabase poller for sonicgrid `bug_reports` through
-    the scoped role sonicgrid provides (its S0 phase), idempotent, writes back
-    Bugalizer id and workflow status into sonicgrid's columns, never
-    sonicgrid's own status. Depends on Phase 7 and sonicgrid S0.
+  - B1 `sonicgrid-ingest`: poller for sonicgrid bug reports, idempotent by id.
+    Depends on Phase 7 and sonicgrid S0.
+    **Rescoped 2026-09-15 — S0 shipped a different surface than D2 assumed.**
+    Sonicgrid runs on Vercel and cannot reach BOWIE, so it built an
+    authenticated pull endpoint instead of the scoped Supabase role:
+    `GET /api/bugalizer/bug-reports?cursor=&limit=` behind a static bearer
+    token, returning `{reports[], next_cursor}` over a composite
+    `(created_at, id)` cursor. B1 passes the cursor back verbatim and stores
+    it only when non-null. The write-back columns, response mapping and
+    sonicgrid admin column named for S0 are **deferred, not planned** — so B1
+    writes nothing back and the Aegis exit line "id and status appear on the
+    sonicgrid admin bugs page" no longer applies (D5 carry, Greg's, still
+    owed to the Aegis direction record). Contract:
+    `documentation/BUGALIZER-POLL-ENDPOINT.md` in the sonicgrid repo; fits
+    B0's `{url, table, credential_env}` with no Bugalizer schema change.
+    Late inserts and reopened reports can sort behind a checkpoint — B1's
+    documented reconciliation boundary. Blocked until sonicgrid records S0's
+    hosted acceptance walk (sonicgrid `docs/roadmap.md`, Phase 46); the S0
+    route itself is merged (sonicgrid `e1fb2b7d`, PR #581).
   - B2 `open-pr`: apply the proposed diff on `fix/bugalizer-<report-id>`,
     commit, push, open a PR with the analysis as the body; unlock
     fix_approved and fix_committed; write policy tested (never main, never
@@ -80,9 +95,10 @@ tree-sitter / uv
 - **Depends on:** Phase 7
 
 ### Phase 7: bugalizer-revive (B0)
-- **Status:** Implemented 2026-09-12; impl approved by codex (round 3, PR #2 at 7b73c30,
-  `docs/handoffs/bugalizer-revive_impl_rounds.jsonl`). Complete once PR #2 is merged and
-  `scripts/windows/check-service.ps1` reports VERIFIED on BOWIE (`docs/phases/bugalizer-revive.md`)
+- **Status:** Complete — impl approved by codex 2026-09-12 (round 3, PR #2 at 7b73c30,
+  `docs/handoffs/bugalizer-revive_impl_rounds.jsonl`); PR #2 merged, and
+  `scripts/windows/check-service.ps1` reported VERIFIED on BOWIE
+  (`docs/phases/bugalizer-revive.md`). Follow-up PR #3 fixed the service-name match.
 - **Description:** Bring the repo back under tagteam (clean tree, CI, docs
   that match the suite), add the per-request provider/model/key override on
   the cloud analyze call (D3) and the per-project ingest-source setting B1
