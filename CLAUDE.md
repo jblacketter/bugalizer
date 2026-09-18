@@ -41,6 +41,7 @@ src/bugalizer/
     orchestrator.py # Pipeline coordinator with atomic claim
   git_ops/
     repo.py        # Git clone, pull, SHA, file listing via subprocess
+    pull_request.py # open-pr: detached worktree commit, guarded push, GitHub PR (Phase 8)
   queue/
     worker.py      # Async background queue worker (Stages 1-3)
 tests/
@@ -53,6 +54,7 @@ tests/
   test_repo_map.py # repo map builder + cache
   test_localizer.py # localization, eligibility, path safety, migration
   test_fix_proposer.py # Stage 4: proposals, retry classification, override + key secrecy
+  test_open_pr.py  # open-pr against a real git http-backend + mock GitHub API
 ```
 
 ## Architecture
@@ -79,6 +81,9 @@ tests/
   cloud LLM override with key secrecy + `key_ref` attribution, ingest seam (`ingest_source`/`ingest_config`),
   `/health` `auth_enabled` + `revision`, CI, `scripts/windows/check-service.ps1`. Post-merge acceptance:
   the script reports VERIFIED on BOWIE.
+- **Phase 8 (open-pr, B2): IMPLEMENTED, in review**: `POST /reports/{id}/open-pr` turns a
+  proposal into a PR on `fix/bugalizer-<id>` (never merge, never force, one PR per report);
+  `BUGALIZER_GITHUB_TOKEN`; `scripts/windows/open-pr-smoke.ps1` for the BOWIE acceptance walk.
 
 ## Handoff Workflow
 Uses tagteam: claude (lead) ↔ codex (reviewer). Read `tagteam.yaml` and `handoff-state.json`,

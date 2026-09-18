@@ -1,0 +1,31 @@
+{
+  "state": "in-progress",
+  "ready_for": "lead",
+  "round": 1,
+  "phase": "open-pr",
+  "type": "impl",
+  "lead": "claude",
+  "reviewer": "codex",
+  "date": "2026-09-18",
+  "baseline": {
+    "sha": "ede1dd12e15093c94203f52bbde753ff2ccf29db",
+    "dirty_paths": [
+      "A  docs/phases/open-pr.md",
+      "M  docs/roadmap.md"
+    ],
+    "captured_at": "2026-09-18T00:56:57.928545+00:00",
+    "source": "copied-from-plan"
+  },
+  "impl_boundary": {
+    "sha": "ede1dd12e15093c94203f52bbde753ff2ccf29db",
+    "dirty": {
+      "docs/phases/open-pr.md": "f4bf78da2d3ee5803ee0e8e712af8bd8f55bebb19631629595aa63c379235fc7",
+      "docs/roadmap.md": "bc1dd6a1b42d1091af0f1fce6e32b0f0a9c983840df508889410a46551678336",
+      "handoff-state.json": "b16a3fe4c8830498708e100b8fe2c8d6f4efe85a7d260d0c66be046b7aff8224",
+      "docs/handoffs/open-pr_plan_rounds.jsonl": "e7d07b3ddc696142948f9cb8ea430a205b8daf9d1c2e484d157a0fbf9183a31a",
+      "docs/handoffs/open-pr_plan_status.json": "9872465e2e8e7ef84e97c63bda3dc6f8efa3b6d3f79fa40f0c6a736da62d3575"
+    },
+    "captured_at": "2026-09-18T01:07:32.714060+00:00",
+    "source": "copied-from-plan"
+  }
+}

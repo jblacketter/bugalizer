@@ -205,6 +205,9 @@ def create_app() -> FastAPI:
             # engine proxy refuses to start against a Bugalizer that reports
             # false.
             "auth_enabled": bool(settings.valid_api_keys()),
+            # Phase 8: whether BUGALIZER_GITHUB_TOKEN is set (open-pr
+            # answers 503 without it). Presence only, never the value.
+            "github_configured": settings.github_token_value() is not None,
             "checks": {
                 "database": db_ok,
                 "ollama": ollama_ok,

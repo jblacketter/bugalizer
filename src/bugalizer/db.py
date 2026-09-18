@@ -167,6 +167,22 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.commit()
         logger.info("Migration: added token_usage.key_ref column")
 
+    # Phase 8 (open-pr): the claim owner token on reports, and the PR record
+    # plus push intent on proposals. All nullable.
+    if "claim_token" not in br_columns:
+        conn.execute("ALTER TABLE bug_reports ADD COLUMN claim_token TEXT")
+        conn.commit()
+        logger.info("Migration: added bug_reports.claim_token column")
+    fp_columns = {row[1] for row in conn.execute("PRAGMA table_info(fix_proposals)").fetchall()}
+    for column, sql_type in (
+        ("pr_url", "TEXT"), ("pr_number", "INTEGER"),
+        ("pushed_sha", "TEXT"), ("pr_opened_at", "TEXT"),
+    ):
+        if fp_columns and column not in fp_columns:
+            conn.execute(f"ALTER TABLE fix_proposals ADD COLUMN {column} {sql_type}")
+            conn.commit()
+            logger.info("Migration: added fix_proposals.%s column", column)
+
 
 _now_lock = threading.Lock()
 _last_now_dt: Optional[datetime] = None
@@ -235,6 +251,7 @@ CREATE TABLE IF NOT EXISTS bug_reports (
     labels TEXT,
     status TEXT NOT NULL DEFAULT 'submitted',
     analysis_mode TEXT NOT NULL DEFAULT 'auto',
+    claim_token TEXT,
     resolution_reason TEXT,
     assigned_to TEXT,
     created_at TEXT NOT NULL,
@@ -275,6 +292,10 @@ CREATE TABLE IF NOT EXISTS fix_proposals (
     status TEXT DEFAULT 'proposed',
     reviewed_by TEXT,
     review_notes TEXT,
+    pr_url TEXT,
+    pr_number INTEGER,
+    pushed_sha TEXT,
+    pr_opened_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -584,16 +605,65 @@ def queue_counts(project_id: Optional[str] = None) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 @retry_on_locked
-def try_claim_report(report_id: str, expected_status: str, new_status: str) -> bool:
+def try_claim_report(
+    report_id: str,
+    expected_status: str,
+    new_status: str,
+    *,
+    claim_token: Optional[str] = None,
+) -> bool:
     """Atomically claim a report by transitioning its status.
+
+    With `claim_token` (Phase 8 open-pr), the same compare-and-set also
+    records the claim's owner token.
 
     Returns True only if this caller won the claim (rowcount == 1).
     """
     conn = _get_conn()
     now = _now()
+    if claim_token is None:
+        cursor = conn.execute(
+            "UPDATE bug_reports SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+            (new_status, now, report_id, expected_status),
+        )
+    else:
+        cursor = conn.execute(
+            "UPDATE bug_reports SET status = ?, claim_token = ?, updated_at = ? "
+            "WHERE id = ? AND status = ?",
+            (new_status, claim_token, now, report_id, expected_status),
+        )
+    conn.commit()
+    return cursor.rowcount == 1
+
+
+@retry_on_locked
+def adopt_claim(report_id: str, observed_token: Optional[str], new_token: str) -> bool:
+    """Take over an abandoned `fix_approved` claim (Phase 8).
+
+    Compare-and-set on the token the caller observed, so of two requests
+    racing to adopt the same claim only one wins.
+    """
+    conn = _get_conn()
     cursor = conn.execute(
-        "UPDATE bug_reports SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
-        (new_status, now, report_id, expected_status),
+        "UPDATE bug_reports SET claim_token = ?, updated_at = ? "
+        "WHERE id = ? AND status = 'fix_approved' AND claim_token IS ?",
+        (new_token, _now(), report_id, observed_token),
+    )
+    conn.commit()
+    return cursor.rowcount == 1
+
+
+@retry_on_locked
+def release_claim(report_id: str, claim_token: str) -> bool:
+    """Return a claimed report to `fix_proposed` and clear its token.
+
+    Only the claim's owner can release it (CAS on the token).
+    """
+    conn = _get_conn()
+    cursor = conn.execute(
+        "UPDATE bug_reports SET status = 'fix_proposed', claim_token = NULL, updated_at = ? "
+        "WHERE id = ? AND status = 'fix_approved' AND claim_token = ?",
+        (_now(), report_id, claim_token),
     )
     conn.commit()
     return cursor.rowcount == 1
@@ -961,6 +1031,132 @@ def fix_proposals_for_report(bug_report_id: str) -> list[dict[str, Any]]:
         (bug_report_id,),
     ).fetchall()
     return [_fix_proposal_row_to_dict(r) for r in rows]
+
+
+def fix_proposal_of_report(bug_report_id: str, proposal_id: str) -> Optional[dict[str, Any]]:
+    """The proposal with this ID if it belongs to this report, else None."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM fix_proposals WHERE id = ? AND bug_report_id = ?",
+        (proposal_id, bug_report_id),
+    ).fetchone()
+    return _fix_proposal_row_to_dict(row) if row else None
+
+
+def recorded_pull_request(bug_report_id: str) -> Optional[dict[str, Any]]:
+    """The report's proposal that has a recorded PR, if any (one PR per report)."""
+    conn = _get_conn()
+    row = conn.execute(
+        """SELECT * FROM fix_proposals
+           WHERE bug_report_id = ? AND pr_url IS NOT NULL
+           ORDER BY pr_opened_at ASC LIMIT 1""",
+        (bug_report_id,),
+    ).fetchone()
+    return _fix_proposal_row_to_dict(row) if row else None
+
+
+@retry_on_locked
+def fix_proposal_record_push_intent(proposal_id: str, pushed_sha: str, branch_name: str) -> None:
+    """Record the commit about to be pushed, before the push (Phase 8).
+
+    A retry that finds the branch on the remote with this tip knows the push
+    was ours and resumes at the PR POST instead of refusing the branch.
+    """
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE fix_proposals SET pushed_sha = ?, branch_name = ?, updated_at = ? WHERE id = ?",
+        (pushed_sha, branch_name, _now(), proposal_id),
+    )
+    conn.commit()
+
+
+class ClaimLostError(RuntimeError):
+    """The open-pr claim no longer belongs to this request."""
+
+
+def _record_pr_proposal(
+    conn: sqlite3.Connection,
+    bug_report_id: str,
+    proposal_id: str,
+    *,
+    pr_url: str,
+    pr_number: int,
+    pushed_sha: Optional[str],
+    branch_name: str,
+    now: str,
+) -> None:
+    cursor = conn.execute(
+        """UPDATE fix_proposals
+           SET pr_url = ?, pr_number = ?, pushed_sha = COALESCE(?, pushed_sha),
+               branch_name = ?, pr_opened_at = ?, status = 'pr_opened', updated_at = ?
+           WHERE id = ? AND bug_report_id = ?""",
+        (pr_url, pr_number, pushed_sha, branch_name, now, now, proposal_id, bug_report_id),
+    )
+    if cursor.rowcount != 1:
+        raise ValueError("proposal does not belong to the report")
+
+
+def _record_pr_report(
+    conn: sqlite3.Connection, bug_report_id: str, claim_token: str, now: str
+) -> None:
+    cursor = conn.execute(
+        """UPDATE bug_reports SET status = 'fix_committed', claim_token = NULL, updated_at = ?
+           WHERE id = ? AND status = 'fix_approved' AND claim_token = ?""",
+        (now, bug_report_id, claim_token),
+    )
+    if cursor.rowcount != 1:
+        raise ClaimLostError("open-pr claim lost before the PR was recorded")
+
+
+@retry_on_locked
+def record_pull_request(
+    bug_report_id: str,
+    proposal_id: str,
+    claim_token: str,
+    *,
+    pr_url: str,
+    pr_number: int,
+    pushed_sha: Optional[str],
+    branch_name: str,
+) -> None:
+    """Record an opened PR against its owning proposal and move the report
+    `fix_approved -> fix_committed`, in one transaction (Phase 8).
+
+    `proposal_id` must belong to the report. The report update is a CAS on
+    the caller's claim token; if it matches no row, the claim was lost and
+    nothing is written. `pushed_sha=None` keeps the proposal's recorded value.
+    """
+    conn = _get_conn()
+    now = _now()
+    if conn.in_transaction:
+        conn.commit()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _record_pr_proposal(
+            conn, bug_report_id, proposal_id,
+            pr_url=pr_url, pr_number=pr_number, pushed_sha=pushed_sha,
+            branch_name=branch_name, now=now,
+        )
+        _record_pr_report(conn, bug_report_id, claim_token, now)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def fix_analysis_for_proposal(proposal: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """The completed Stage 4 analysis that produced a proposal: the newest
+    completed `fix` row created no later than the proposal (the stage writes
+    the analysis immediately before the proposal)."""
+    conn = _get_conn()
+    row = conn.execute(
+        """SELECT * FROM analyses
+           WHERE bug_report_id = ? AND phase = 'fix' AND status = 'completed'
+           AND created_at <= ?
+           ORDER BY created_at DESC LIMIT 1""",
+        (proposal["bug_report_id"], proposal["created_at"]),
+    ).fetchone()
+    return _analysis_row_to_dict(row) if row else None
 
 
 def reports_eligible_for_fix() -> list[dict[str, Any]]:

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from typing import Optional
 
 from bugalizer.auth import require_api_key
@@ -33,12 +36,23 @@ from bugalizer.models import (
     BugReportResponse,
     BugStatus,
     LocalizationResponse,
+    OpenPrRequest,
+    OpenPrResponse,
     StatusUpdateRequest,
     StatusUpdateResponse,
     TERMINAL_STATUSES,
     validate_transition,
 )
+from bugalizer.config import settings
+from bugalizer.git_ops.pull_request import (
+    OpenPrError,
+    open_pr_running,
+    open_pull_request,
+    redact,
+)
 from bugalizer.pipeline.orchestrator import process_fix_proposal, run_local_analysis
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["reports"])
 
@@ -423,7 +437,9 @@ def list_fix_proposals(
     Returns an object `{"fix_proposals": [...]}`. Each proposal includes
     `id, analysis_id, root_cause, explanation, diff, confidence,
     files_changed, status, created_at, updated_at` (and the nullable
-    review fields). Read-only; proposals are created by the Stage 4
+    review fields), plus the Phase 8 open-pr fields `branch_name, pr_url,
+    pr_number, pushed_sha, pr_opened_at` (null until a PR is opened; status
+    becomes `pr_opened`). Read-only; proposals are created by the Stage 4
     pipeline.
     """
     row = report_get(report_id)
@@ -432,11 +448,58 @@ def list_fix_proposals(
     return {"fix_proposals": fix_proposals_for_report(report_id)}
 
 
+@router.post(
+    "/reports/{report_id}/open-pr",
+    response_model=OpenPrResponse,
+    responses={200: {"description": "The report's PR already exists (created: false)"},
+               201: {"description": "PR opened (created: true)"}},
+)
+async def open_pr(
+    report_id: str,
+    body: Optional[OpenPrRequest] = None,
+    _key: str = Depends(require_api_key),
+) -> JSONResponse:
+    """Open a pull request from the report's fix proposal (Phase 8 / B2).
+
+    Applies the proposal's diff on `fix/bugalizer-<report-id>` off the fetched
+    default branch, pushes it and opens a PR (201). Idempotent per report: a
+    repeat answers 200 with the same PR. The call is the human approval
+    (`fix_proposed -> fix_approved -> fix_committed`). Bugalizer never merges.
+    Handled failures answer `{code, detail, ...}`; see docs/phases/open-pr.md.
+    """
+    if report_get(report_id) is None:
+        raise HTTPException(status_code=404, detail="Bug report not found")
+    try:
+        status, payload = await open_pull_request(
+            report_id, body.fix_proposal_id if body else None
+        )
+    except OpenPrError as exc:
+        return JSONResponse(status_code=exc.status, content=exc.body())
+    except Exception as exc:
+        token = settings.github_token_value()
+        logger.error(
+            "open-pr on report %s failed unexpectedly: %s: %s",
+            report_id, type(exc).__name__, redact(str(exc), token)[:500],
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"code": "internal_error", "detail": "open-pr failed; see the service log"},
+        )
+    return JSONResponse(status_code=status, content=payload)
+
+
 @router.delete("/reports/{report_id}", status_code=204)
 def delete_report(
     report_id: str,
     _key: str = Depends(require_api_key),
 ) -> None:
-    """Delete a bug report."""
+    """Delete a bug report.
+
+    Refused (409) while an open-pr request holds the report's claim.
+    """
+    if open_pr_running(report_id):
+        raise HTTPException(
+            status_code=409, detail="An open-pr request for this report is running"
+        )
     if not report_delete(report_id):
         raise HTTPException(status_code=404, detail="Bug report not found")

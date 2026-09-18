@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 
-from pydantic import model_validator
+from typing import Optional
+
+from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -85,6 +87,18 @@ class Settings(BaseSettings):
     fix_max_file_bytes: int = 524_288       # 512 KiB per-file cap
     fix_enable_prompt_caching: bool = True
 
+    # Open PR (Phase 8 / B2). One fine-grained GitHub token (single repo;
+    # Contents + Pull requests read/write). Unset = POST /reports/{id}/open-pr
+    # answers 503. Never logged, never returned; only `/health`'s
+    # `github_configured` bool reports its presence.
+    github_token: Optional[SecretStr] = None
+    commit_author_name: str = "Bugalizer"
+    commit_author_email: str = "bugalizer@localhost"
+    # Test seams: aim git and the REST client at local servers. Not operator
+    # settings (not in .env.example).
+    github_web_base: str = "https://github.com"
+    github_api_base: str = "https://api.github.com"
+
     # `.env` in the working directory is read on startup (§5.5 native-service
     # deploys); real environment variables always take precedence over it.
     # The path is overridable via BUGALIZER_ENV_FILE so the test suite can
@@ -133,6 +147,13 @@ class Settings(BaseSettings):
         if not self.api_keys.strip():
             return set()
         return {k.strip() for k in self.api_keys.split(",") if k.strip()}
+
+    def github_token_value(self) -> Optional[str]:
+        """The configured GitHub token, or None when unset or blank."""
+        if self.github_token is None:
+            return None
+        value = self.github_token.get_secret_value().strip()
+        return value or None
 
     def cors_origin_list(self) -> list[str]:
         """Return the configured CORS origins (empty list = closed)."""
