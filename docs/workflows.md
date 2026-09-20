@@ -67,6 +67,26 @@ reviewer asks for it, asks a question only a human can answer, or after 10
 consecutive stale rounds. The arbiter reads `tagteam brief` and rules with
 `tagteam rule approve|request-changes|answer`.
 
+When a phase's implementation is approved, `tagteam report --phase P` prints
+what it took: rounds, change requests, gate bounces and minutes, elapsed turn
+time per role (including time waiting for someone to relay the turn),
+start-to-approve, the usage rows stored under the phase and how many turns
+they can be matched to. It is read-only and writes nothing; paste the block
+into the phase doc's closeout. Tokens appear only for turns tagteam ran and
+recorded (headless turns, panel lenses, briefs); nothing is reported in
+dollars.
+
+`tagteam bench` replays recorded reviewer rounds against reviewer cells
+(`claude:<model>:<effort>`) to compare each cell's verdict with the recorded
+one: `bench select` lists rounds with a reviewer verdict, `bench run --round
+P:T:N --cell …` is a dry run (grid + proxy token estimate) until `--yes`, and
+`bench table` shows agreement, missed and extra change requests, tokens and
+seconds per cell. Every lead submission and AMEND pins its working tree under
+`refs/tagteam/snapshots/` (no model involved), so replays of new rounds are
+exact; older rounds need `@BASE..REV` and are reported separately as
+`asserted`. Each pair costs about one reviewer turn of window, and agreement is
+with the recorded reviewer, not with ground truth.
+
 ## Verification: the one-run rule
 
 An impl submission costs **one** full-suite run — the one on the record. With
@@ -87,6 +107,12 @@ reviewer reads the diff and does not re-run the suite.
 | Reviewer panel (`panel:` block) | 2–3 narrow lens reviews merged into one reviewer entry |
 | Full roadmap (`/tagteam:handoff start --roadmap`) | All incomplete phases, in dependency order, with review gates between them |
 
+One watcher runs per project. A second `tagteam watch` for the same project is
+refused and names the running one's pid (`kill <pid>` stops it; a watcher shuts
+down cleanly on SIGTERM, including any in-flight headless turn). Stopping
+`tagteam serve` with Ctrl+C stops the watchers that cockpit started and leaves
+any other watcher running, saying so.
+
 ## Steering
 
 - `tagteam interject "note" [--to lead|reviewer]` — a note the next turn must honor.
@@ -104,6 +130,66 @@ reviewer reads the diff and does not re-run the suite.
 | `docs/roadmap.md` | The phase list and each phase's status |
 | `docs/escalations/` | Decision briefs for escalated cycles |
 | `.tagteam/` | Watcher and headless runtime state (not for editing) |
+| `tagteam-manifest.json` | What `setup`/`upgrade` last wrote (path, sha256, version) — commit it |
+
+## Framework files and upgrades
+
+`docs/workflows.md` and, without the plugin, `.claude/skills/handoff/SKILL.md`
+are framework files. After
+`pip install -U tagteam`, run `tagteam upgrade --preview` (every registered
+project) or `tagteam setup --preview` (this one) to see what would change,
+then run it without `--preview`:
+
+- files whose bytes tagteam wrote (recorded in `tagteam-manifest.json`, a
+  known vendored contract, or an exact copy of what an earlier release
+  installed — see below) are refreshed to the new package;
+- files that match the new package are left alone;
+- anything else is **kept** and reported with the exact
+  `tagteam setup DIR --accept PATH` line that overwrites it. Accepting needs
+  the path tracked and clean in git (so `git checkout -- PATH` undoes it);
+  `--force` lifts only that check.
+
+Earlier versions also installed `templates/*.md` and `docs/checklists/*.md`.
+Nothing reads a project's copy of either, so they are **retired**: no longer
+created, and on the next `setup` / `upgrade`
+
+- a copy the installed package can reproduce byte for byte is removed
+  (`retired  templates/cycle.md`), and the directory with it once empty —
+  your own files in it, and the directory, are left alone;
+- a copy tagteam wrote in an older version whose bytes it no longer ships is
+  removed only when git can restore it (tracked and clean); otherwise it is
+  kept until you commit it, or delete it with `--accept PATH --force`;
+- a copy you edited is kept; `tagteam setup DIR --accept PATH` deletes it
+  under the same tracked-and-clean rule;
+- a symlink or non-regular file there is kept and never an error.
+
+**Copies from earlier releases.** The package carries the earlier sources of
+its framework files (through 3.12.0 — a fixed set; later versions are recorded
+in the manifest). One of them, the pre-plugin `workflows.md` (through 3.10.0),
+is carried as a sha256 digest only, because its text is nothing but commands
+that no longer exist: an exact copy is still recognised and refreshed, but the
+old text cannot be had back from the installed package. A file that equals one of them exactly — verbatim, or
+rendered with this project's configured lead / reviewer names, or with the two
+swapped (`setup` wrote the names into templates until 3.12.0) — counts as
+tagteam's: an old `docs/workflows.md` is refreshed, an old template is
+retired. The match is byte for byte. If the agent names in `tagteam.yaml`
+changed since the file was written, or the file was edited at all, it is kept
+as yours.
+
+`tagteam bench` uses a project's own `docs/checklists/<type>_review.md` when
+there is one and the package's otherwise.
+
+Pre-plugin flat skills (`.claude/skills/handoff-*.md`) are never deleted
+without `--accept PATH`. Symlinks or directories at a managed path — or at any
+directory above one — are refused and left for you to fix by hand; setup never
+creates or writes through a link, not for the framework directories, not for
+the once-only seeds (`docs/roadmap.md`, `docs/decision_log.md`, `AGENTS.md`,
+`CLAUDE.md`), not for the manifest. A new target directory (missing ancestors
+included) is created the same checked way; `--preview` on one reports what a
+fresh setup would create and creates nothing — nor does `tagteam upgrade
+--preview` touch the project registry. A second run changes nothing. `tagteam state`
+shows the package version, the manifest version and the plugin status side by
+side — a package update does not move the other two.
 
 ## Choosing and changing roles
 
@@ -133,6 +219,50 @@ actions. Existing terminal panes are not identified or replaced automatically.
 operation. Desktop and headless sessions may have different tools and access.
 
 Existing project instruction files are preserved. New instruction pointers are
-created only when absent. Safe migration of customized legacy framework files
-is separate work: do not treat readiness as confirmation that an old project's
-skills and rules are synchronized.
+created only when absent. Readiness does not mean an old project's own skills
+and rules agree with the new assignment — run `tagteam doctor` after a switch.
+
+## Diagnostics: `tagteam doctor`
+
+`tagteam doctor [DIR] [--json]` is a read-only report. It writes nothing, probes
+no service, and prints no configured value, command argument or secret. It is
+safe for a read-only helper (`TAGTEAM_READ_ONLY=1`).
+
+- **Legacy workflow findings.** Project skills (`.claude/skills/`), commands
+  (`.claude/commands/`), `AGENTS.md` and `CLAUDE.md` that use retired command
+  syntax (the retired pre-plugin `handoff-*` slash commands) or name a fixed role holder ("Claude is
+  always the lead"). A fixed role that contradicts `tagteam.yaml` is a `warn`;
+  one that matches today is `info` (stale after a switch). Each finding shows
+  the line and a manual remediation. Findings are candidates: tagteam has no
+  provenance for these files and never edits or deletes them. `setup` and
+  `upgrade` print one line pointing here when a project has any.
+- **Per role, desktop and headless separately.** The launch executable and the
+  headless provider/executable (`found` / `missing` / `unknown`), which
+  instruction file each provider loads by itself, and what a headless turn
+  injects (and whether it is truncated).
+- **Contract and tools.** `tagteam contract`, the plugin (`unknown` when Claude
+  Code could not be asked — not the same as `missing`), the vendored skill,
+  `.mcp.json` server names and Claude hook events — configured, not probed.
+- **Protections.** Which guarantees are enforcement and which are instructions:
+  a Claude hook does not bind a Codex process.
+
+Symlinks and non-regular files are reported, never followed or opened.
+
+## Capabilities and alternatives
+
+Tagteam cannot know which tools a task needs. Record that in your project
+instructions (`AGENTS.md` or `CLAUDE.md`), in role-neutral terms, so both
+providers read the same thing:
+
+```markdown
+## Capabilities
+- Datadog (logs, monitors) — needed for incident triage evidence.
+  Without it: do not triage; ask the arbiter for an export.
+- Markdown/docs edits need no external tools.
+```
+
+A missing tool should block only the tasks whose evidence depends on it.
+`tagteam doctor` shows what is configured; it cannot show that a connection
+works in a given session, so a task that needs one should verify it first.
+Keep durable decisions and evidence in project files, not in a provider's
+private memory, and never copy credentials between tools.

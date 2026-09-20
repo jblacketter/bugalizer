@@ -173,7 +173,8 @@ tree-sitter / uv
 - **Open question:** the Phase 8 token is scoped to one repo. Per-project
   tokens (`credential_env` like the ingest seam) only matter if a second
   private repo appears.
-- **Depends on:** Phase 8 (credential code), Dan's token for acceptance
+- **Needs:** Phase 8's credential code; Dan's token for the acceptance run.
+- **Depends on:** Phase 8
 
 ## Decision Log
 See `docs/decision_log.md`
