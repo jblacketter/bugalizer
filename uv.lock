@@ -1578,14 +1578,14 @@ wheels = [
 
 [[package]]
 name = "tagteam"
-version = "3.14.1"
+version = "3.14.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/92/b9/3e3b7eb6ca0accbe2f237e0022ac628cd47639b801d106eb97b443e498e2/tagteam-3.14.1.tar.gz", hash = "sha256:0d18748d492624814840e71780aeeaa972f1258ca0be4b845b1fa2f48b36e63f", size = 839487, upload-time = "2026-09-20T23:09:54.22Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5a/ce/6bbd4adf830bc4cef7b9524bad103eadbbcc545b7541d522e5f2f3b4f552/tagteam-3.14.3.tar.gz", hash = "sha256:67b065383154285cf8e71987ff8c3cbfb2e7ea5a7569e1219703bac6754d1005", size = 854529, upload-time = "2026-09-21T03:01:53.523Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/78/98/278c8265313a7c0c1debe73e169aa96bdc94c76ecca546230068aa5a0a58/tagteam-3.14.1-py3-none-any.whl", hash = "sha256:1b3e50e1a4dc0d4b6951fb69a5006449a4a6ce36f2ff8c19f24d846d642e45cf", size = 580503, upload-time = "2026-09-20T23:09:52.612Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/75/1d6507289b325665f0de4eea3d2e90488fc094e2718c30ca219241b93b0b/tagteam-3.14.3-py3-none-any.whl", hash = "sha256:5d5042151a01c62849d55a7223fd004c3050e9fd7942f33c9c94c82be63b6c7d", size = 588072, upload-time = "2026-09-21T03:01:51.929Z" },
 ]
 
 [[package]]
