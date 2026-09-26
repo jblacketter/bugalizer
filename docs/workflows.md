@@ -116,6 +116,26 @@ any other watcher running, saying so.
 ## Steering
 
 - `tagteam interject "note" [--to lead|reviewer]` — a note the next turn must honor.
+- `tagteam orders` — standing orders, delivered to both agents in every turn
+  (like an interjection that is never consumed). Project orders live in a
+  committed `tagteam-orders.json`; `--run` sets an override for the current
+  run, dropped when that run ends. **Enforced:** `tagteam orders stop
+  phase|roadmap` decides whether the run stops for you after each phase or goes
+  on to the next ready roadmap phase. The engine applies it when an
+  implementation is approved. **Advisory:** `tagteam orders add "hold the PR
+  for my approval"` notes are delivered but not enforced, because tagteam runs
+  no git. Without orders, nothing changes.
+- `tagteam config keys` / `tagteam config set KEY VALUE --preview` — edit the
+  gate, panel, briefer and re-send settings in `tagteam.yaml` without losing
+  its comments. An edit is written only when the engine would then do what
+  you asked, and the preview shows the diff first.
+- `tagteam job start ci-watch --pr N` (or `--run ID`, `--workflow NAME --ref
+  REF`, `--pypi PKG==VER`): wait for CI or a release without a model. The job
+  polls in the background until it knows the answer, then tells you once: a
+  desktop notification, plus an interjection for the lead with `--to-lead`.
+  A `--workflow` watch is tied to the commit `--ref` names, so the previous
+  push's run can never answer it. `tagteam job list|status|log|cancel`. A job
+  is not a turn and never holds the turn slot.
 - `tagteam pause --reason "…"` / `tagteam resume` — hold dispatch without losing state.
 - `tagteam cancel-turn` — abandon an in-flight headless turn.
 - `tagteam serve` — the cockpit: talk to the lead, launch, watch, rule.
@@ -127,7 +147,7 @@ any other watcher running, saying so.
 | `handoff-state.json` | Whose turn, what command, current phase/type/round |
 | `docs/handoffs/<phase>_<type>_rounds.jsonl` + `_status.json` | The cycle record |
 | `docs/phases/<phase>.md` | The plan (the lead writes it; the reviewer reads it) |
-| `docs/roadmap.md` | The phase list and each phase's status |
+| `docs/roadmap.md` | The phase list and each phase's status. A heading still titled `[Name]` is a placeholder, not a phase — `tagteam roadmap check` lists the ones left to rename |
 | `docs/escalations/` | Decision briefs for escalated cycles |
 | `.tagteam/` | Watcher and headless runtime state (not for editing) |
 | `tagteam-manifest.json` | What `setup`/`upgrade` last wrote (path, sha256, version) — commit it |
@@ -189,7 +209,9 @@ included) is created the same checked way; `--preview` on one reports what a
 fresh setup would create and creates nothing — nor does `tagteam upgrade
 --preview` touch the project registry. A second run changes nothing. `tagteam state`
 shows the package version, the manifest version and the plugin status side by
-side — a package update does not move the other two.
+side — a package update does not move the other two. The manifest's version is
+the tagteam that last *changed* the manifest: an upgrade that changes no
+framework file rewrites nothing, so it can stay behind the package.
 
 ## Choosing and changing roles
 
@@ -228,6 +250,15 @@ and rules agree with the new assignment — run `tagteam doctor` after a switch.
 no service, and prints no configured value, command argument or secret. It is
 safe for a read-only helper (`TAGTEAM_READ_ONLY=1`).
 
+- **Other tagteam installs.** A tagteam installed in the project's own
+  `.venv` or `venv` runs instead of the one on your PATH for anything launched
+  through that venv (`.venv/bin/tagteam`, `python -m tagteam`, a watcher
+  started from it). Doctor lists each copy it finds; one whose version differs
+  from the running tagteam is a `warn`, and `tagteam state` adds
+  `· .venv: tagteam X (differs from the running Y)` to its `Framework:` line.
+  An editable link is listed, not judged. Look-only: nothing is imported or
+  run, and nothing is read through a symlink. Upgrade or remove the copy —
+  tagteam never does it for you.
 - **Legacy workflow findings.** Project skills (`.claude/skills/`), commands
   (`.claude/commands/`), `AGENTS.md` and `CLAUDE.md` that use retired command
   syntax (the retired pre-plugin `handoff-*` slash commands) or name a fixed role holder ("Claude is
@@ -243,6 +274,10 @@ safe for a read-only helper (`TAGTEAM_READ_ONLY=1`).
 - **Contract and tools.** `tagteam contract`, the plugin (`unknown` when Claude
   Code could not be asked — not the same as `missing`), the vendored skill,
   `.mcp.json` server names and Claude hook events — configured, not probed.
+- **Standing orders.** When `tagteam-orders.json` exists, doctor shows its
+  stop order and how many advisory notes it has (never their text). A
+  malformed, oversized or symlinked file is a `warn`, because the engine
+  treats it as no project orders.
 - **Protections.** Which guarantees are enforcement and which are instructions:
   a Claude hook does not bind a Codex process.
 
