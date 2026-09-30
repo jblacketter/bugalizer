@@ -177,8 +177,10 @@ tree-sitter / uv
 - **Depends on:** Phase 8
 
 ### Phase 10: sonicgrid-ingest (B1)
-- **Status:** Implemented, codex-approved 2026-09-30 (impl round 2; plan round 2),
-  not yet merged (`docs/phases/sonicgrid-ingest.md`). Acceptance: `docs/sonicgrid-ingest-acceptance.md`
+- **Status:** Complete: codex-approved 2026-09-30 (impl round 2; plan round 2), merged
+  (PR #6, setup script PR #7), live on BOWIE 2026-09-30: bugs filed in sonicgrid appear
+  on the BOWIE dashboard (acceptance walked by Jack; `docs/sonicgrid-ingest-acceptance.md`).
+  (`docs/phases/sonicgrid-ingest.md`). Acceptance: `docs/sonicgrid-ingest-acceptance.md`
   on BOWIE after merge.
   Unblocked: sonicgrid S0 hosted acceptance PASS 2026-09-30. Lands before
   Phase 9 (arbiter, 2026-09-29); imported reports localize against the
@@ -195,6 +197,35 @@ tree-sitter / uv
   - `GET /projects/{id}/ingest`, `POST /projects/{id}/ingest/run`; `/health` ingest block
   - Token secrecy tests matching Phases 7 and 8; reporter email never stored
 - **Depends on:** Phase 7
+
+### Phase 11: sonicgrid-triage-sync (B3, proposed)
+- **Status:** Proposed 2026-09-30, not queued. Direction:
+  `~/projects/QA/docs/bugalizer-sonicgrid-triage-direction-2026-09-30.html`
+  (rulings E1 to E6, Jack; first users Jack and Dan). Pairs with
+  sonicgrid's S2 `sonicgrid-triage`, whose contract document it builds against.
+- **Description:** Make Bugalizer visible and actionable from sonicgrid without
+  exposing BOWIE: push each report's results to sonicgrid (reporters see status and
+  summary; admins also see root cause, files and diff), and pull admin action requests
+  from it (analyze local/cloud, "fix and open PR", open PR, mode, close). A human
+  reviews and merges every PR on GitHub.
+- **Key Deliverables (sketch):** results push with watermark and retry; action pull
+  (about 15 s) idempotent by action id; "fix and open PR" chained behind two consents,
+  stopping at the first refusal; cloud-tier actions only for a BOWIE-side allowlist of
+  sonicgrid users (initially Jack), everyone else on BOWIE's local models; spend
+  attributed per requesting user via `key_ref`; a second, write-scoped sonicgrid token
+  resolved like `SONICGRID_POLL_TOKEN`.
+- **Needs (outside this repo):** sonicgrid S2's contract document.
+- **Depends on:** Phase 10, Phase 8
+
+### Phase 12: per-user-cloud-keys (B4, proposed, later)
+- **Status:** Proposed 2026-09-30, not queued; after Phase 11 once someone besides Jack
+  needs cloud analysis. Pairs with sonicgrid's S3 `sonicgrid-ai-settings`.
+- **Description:** Nobody spends Jack's cloud accounts but Jack (E4). Each sonicgrid
+  user enters their own Anthropic or Codex/OpenAI key and model on a sonicgrid AI
+  settings page (like the Aegis AI settings); a cloud action carries that key, which
+  Bugalizer uses for that call only through Phase 7's per-request override and never
+  stores or logs.
+- **Depends on:** Phase 11
 
 ## Decision Log
 See `docs/decision_log.md`
