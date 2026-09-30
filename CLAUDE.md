@@ -39,6 +39,9 @@ src/bugalizer/
     localizer.py   # Stage 3: two-pass LLM code localization
     repo_map.py    # AST-based repo map builder + file cache
     orchestrator.py # Pipeline coordinator with atomic claim
+  ingest/
+    sonicgrid.py   # Poll-endpoint response parsing + report mapping (pure; email dropped)
+    poller.py      # Ingest poller: forward walk, reconciliation re-walk, backoff (Phase 10)
   git_ops/
     repo.py        # Git clone, pull, SHA, file listing via subprocess
     pull_request.py # open-pr: detached worktree commit, guarded push, GitHub PR (Phase 8)
@@ -55,6 +58,7 @@ tests/
   test_localizer.py # localization, eligibility, path safety, migration
   test_fix_proposer.py # Stage 4: proposals, retry classification, override + key secrecy
   test_open_pr.py  # open-pr against a real git http-backend + mock GitHub API
+  test_ingest.py   # ingest poller against a fake sonicgrid (cursor rules, re-walk, fencing, secrecy)
 ```
 
 ## Architecture
@@ -84,6 +88,11 @@ tests/
 - **Phase 8 (open-pr, B2): MERGED 2026-09-18 (PR #5), acceptance pending** (token from repo owner; `docs/open-pr-acceptance.md`): `POST /reports/{id}/open-pr` turns a
   proposal into a PR on `fix/bugalizer-<id>` (never merge, never force, one PR per report);
   `BUGALIZER_GITHUB_TOKEN`; `scripts/windows/open-pr-smoke.ps1` for the BOWIE acceptance walk.
+- **Phase 10 (sonicgrid-ingest, B1): IMPLEMENTED, codex-approved 2026-09-30 (impl round 2), merge + BOWIE acceptance pending** (`docs/phases/sonicgrid-ingest.md`):
+  background poller pulls sonicgrid bug reports from S0's poll endpoint into the queue
+  (`BUGALIZER_INGEST_ENABLED`, off by default; token in `SONICGRID_POLL_TOKEN`); idempotent by
+  `external_id`; generation-fenced checkpoint in `ingest_state`; resumable reconciliation re-walk;
+  `GET/POST /projects/{id}/ingest[/run]`. Nothing is written back to sonicgrid.
 
 ## Handoff Workflow
 Uses tagteam: claude (lead) ↔ codex (reviewer). Read `tagteam.yaml` and `handoff-state.json`,

@@ -84,9 +84,9 @@ tree-sitter / uv
     `documentation/BUGALIZER-POLL-ENDPOINT.md` in the sonicgrid repo; fits
     B0's `{url, table, credential_env}` with no Bugalizer schema change.
     Late inserts and reopened reports can sort behind a checkpoint — B1's
-    documented reconciliation boundary. Blocked until sonicgrid records S0's
-    hosted acceptance walk (sonicgrid `docs/roadmap.md`, Phase 46); the S0
-    route itself is merged (sonicgrid `e1fb2b7d`, PR #581).
+    documented reconciliation boundary. S0's hosted acceptance walk passed
+    2026-09-30 (sonicgrid `551342c7`, Phase 46 "B1 may start"); the S0 route
+    is merged (sonicgrid `e1fb2b7d`, PR #581). Runs as Phase 10 below.
   - B2 `open-pr`: apply the proposed diff on `fix/bugalizer-<report-id>`,
     commit, push, open a PR with the analysis as the body; unlock
     fix_approved and fix_committed; write policy tested (never main, never
@@ -175,6 +175,26 @@ tree-sitter / uv
   private repo appears.
 - **Needs:** Phase 8's credential code; Dan's token for the acceptance run.
 - **Depends on:** Phase 8
+
+### Phase 10: sonicgrid-ingest (B1)
+- **Status:** Implemented, codex-approved 2026-09-30 (impl round 2; plan round 2),
+  not yet merged (`docs/phases/sonicgrid-ingest.md`). Acceptance: `docs/sonicgrid-ingest-acceptance.md`
+  on BOWIE after merge.
+  Unblocked: sonicgrid S0 hosted acceptance PASS 2026-09-30. Lands before
+  Phase 9 (arbiter, 2026-09-29); imported reports localize against the
+  hand-refreshed BOWIE clone until Phase 9.
+- **Description:** Pull sonicgrid bug reports into Bugalizer's queue. Reporters keep
+  using sonicgrid's Report Bug dialog; a background poller on BOWIE reads S0's
+  `GET /api/bugalizer/bug-reports` with `SONICGRID_POLL_TOKEN`, imports each report
+  once (idempotent by sonicgrid id), and the normal pipeline triages it. Nothing
+  is written back to sonicgrid.
+- **Key Deliverables:**
+  - Ingest poller task (`BUGALIZER_INGEST_ENABLED`, off by default) with the
+    contract's cursor rules and a periodic full re-walk for reconciliation
+  - `bug_reports.external_id` + partial unique index; `ingest_state` checkpoint table
+  - `GET /projects/{id}/ingest`, `POST /projects/{id}/ingest/run`; `/health` ingest block
+  - Token secrecy tests matching Phases 7 and 8; reporter email never stored
+- **Depends on:** Phase 7
 
 ## Decision Log
 See `docs/decision_log.md`

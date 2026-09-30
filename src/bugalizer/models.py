@@ -208,6 +208,11 @@ class BugReportResponse(BaseModel):
     # ollama, cloud = any other provider (paid). Null when that tier never ran.
     last_local_analysis_at: Optional[str] = None
     last_cloud_analysis_at: Optional[str] = None
+    # Phase 10: set on reports pulled in by the ingest poller (null for API
+    # submissions). `attachments` = [{url, fileName, contentType}] as stored.
+    attachments: Optional[list[dict[str, Any]]] = None
+    ingest_source: Optional[str] = None
+    external_id: Optional[str] = None
 
 
 class BugReportListResponse(BaseModel):
@@ -438,6 +443,29 @@ class ProjectResponse(BaseModel):
 class ProjectListResponse(BaseModel):
     projects: list[ProjectResponse]
     total: int
+
+
+class IngestStatusResponse(BaseModel):
+    """GET /projects/{id}/ingest (Phase 10). Presence flags only: neither the
+    credential nor the (opaque) cursor is returned."""
+    enabled: bool
+    ingest_source: str
+    credential_present: bool
+    cursor_present: bool
+    rewalk_in_progress: bool
+    last_poll_at: Optional[str] = None
+    last_ok_at: Optional[str] = None
+    last_error: Optional[str] = None
+    consecutive_failures: int = 0
+    last_full_walk_at: Optional[str] = None
+    imported_total: int = 0
+
+
+class IngestRunResponse(BaseModel):
+    """POST /projects/{id}/ingest/run (Phase 10): one poll, run now."""
+    imported: int
+    pages: int
+    last_error: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

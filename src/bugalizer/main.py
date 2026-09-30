@@ -19,12 +19,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from bugalizer import __version__
-from bugalizer.config import settings
-from bugalizer.db import init_db
+from bugalizer.config import settings, unknown_env_file_settings
+from bugalizer.db import ingest_health_counts, init_db
 from bugalizer.api.reports import router as reports_router
 from bugalizer.api.projects import router as projects_router
 from bugalizer.api.queue import router as queue_router
 from bugalizer.api.usage import router as usage_router
+from bugalizer.ingest.poller import start_ingest, stop_ingest
 from bugalizer.queue.worker import start_worker, stop_worker, worker_alive
 
 logger = logging.getLogger(__name__)
@@ -83,10 +84,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "This is fine for local dev, but any always-on/LAN deployment MUST "
             "set BUGALIZER_API_KEYS. See docs/deploy-windows.md."
         )
+    unknown = unknown_env_file_settings()
+    if unknown:
+        # Names only: a value could be a secret.
+        logger.warning("Ignoring unknown settings in .env: %s", ", ".join(unknown))
     if settings.queue_enabled:
         start_worker()
+    if settings.ingest_enabled:
+        start_ingest()
     logger.info("Bugalizer started (v%s)", __version__)
     yield
+    await stop_ingest()
     await stop_worker()
     logger.info("Bugalizer stopped")
 
@@ -114,6 +122,17 @@ async def _check_ollama() -> bool:
         return resp.status_code == 200
     except Exception:
         return False
+
+
+async def _ingest_counts(db_ok: bool) -> dict[str, Optional[int]]:
+    """Ingest counts for /health; nulls when the DB cannot answer, so the
+    readiness probe keeps its 503-on-DB-down contract instead of raising."""
+    if db_ok:
+        try:
+            return await asyncio.to_thread(ingest_health_counts)
+        except Exception:  # pragma: no cover - defensive
+            pass
+    return {"projects": None, "failing": None}
 
 
 async def _validation_error_without_input(
@@ -208,6 +227,10 @@ def create_app() -> FastAPI:
             # Phase 8: whether BUGALIZER_GITHUB_TOKEN is set (open-pr
             # answers 503 without it). Presence only, never the value.
             "github_configured": settings.github_token_value() is not None,
+            # Phase 10: aggregate counts only — this endpoint is public, so no
+            # project ids, error codes or cursors. Details are behind the API
+            # key at GET /projects/{id}/ingest. Never changes `status`.
+            "ingest": {"enabled": settings.ingest_enabled, **await _ingest_counts(db_ok)},
             "checks": {
                 "database": db_ok,
                 "ollama": ollama_ok,

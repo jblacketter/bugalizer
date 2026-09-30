@@ -243,6 +243,61 @@ same PR with `created: false`):
 powershell -ExecutionPolicy Bypass -File scripts\windows\open-pr-smoke.ps1 -ReportId <report_id>
 ```
 
+## 7c. Pulling sonicgrid bug reports (Phase 10)
+
+Sonicgrid runs on Vercel and cannot reach this box, so Bugalizer **pulls**:
+with `BUGALIZER_INGEST_ENABLED=true` a background poller reads sonicgrid's
+`GET /api/bugalizer/bug-reports` every `BUGALIZER_INGEST_POLL_SECONDS` (120)
+and imports each active report once (keyed by its sonicgrid id). Imported
+reports enter as `submitted`, labelled `sonicgrid`, and go through Stage 1 and
+free local triage like any API submission. **Nothing is written back to
+sonicgrid**: resolving a bug there does not close Bugalizer's copy, and the
+reporter's email is never stored.
+
+Cost: imported reports are `analysis_mode=auto`. They cost nothing while
+`BUGALIZER_AUTO_FIX_ENABLED=false` (the default); turning auto-fix on makes
+them eligible for paid Stage 4 runs like any other report.
+
+Setup, once:
+
+1. `.env`: `BUGALIZER_INGEST_ENABLED=true` and `SONICGRID_POLL_TOKEN=<same value
+   as BUGALIZER_POLL_TOKEN in Vercel production>`. Restart the service.
+   The token is looked up by name at every poll, real environment first, then
+   `.env`, and is never copied into settings or the process environment; a
+   rotated value takes effect on the next poll. Unknown `BUGALIZER_*` keys in
+   `.env` are ignored and named (not valued) in a startup warning — check the
+   log after editing `.env`.
+2. Point the sonicgrid project at the endpoint (API key required):
+
+```powershell
+$h = @{ "X-API-Key" = "<key>" }
+$body = @{ ingest_source = "supabase"; ingest_config = @{
+  url = "https://sonicgrid.co/api/bugalizer/bug-reports"; table = "bug_reports";
+  credential_env = "SONICGRID_POLL_TOKEN" } } | ConvertTo-Json -Depth 3
+Invoke-RestMethod -Method Patch -Uri https://bugalizer.lan/api/v1/projects/<project_id> `
+  -Headers $h -ContentType application/json -Body $body
+```
+
+Operate:
+
+- `GET /api/v1/projects/{id}/ingest` — `credential_present`, `last_ok_at`,
+  `last_error`, `consecutive_failures`, `rewalk_in_progress`, `imported_total`.
+- `POST /api/v1/projects/{id}/ingest/run` — poll now (works with the poller
+  off); `?full=true` also starts a reconciliation re-walk.
+- `/health` shows only `ingest: {enabled, projects, failing}`; an ingest
+  failure never changes the readiness status.
+
+`last_error` values: `unauthorized` (token mismatch: set both sides again),
+`source_not_configured` (sonicgrid has no token set), `credential_missing`
+(`SONICGRID_POLL_TOKEN` empty here), `bad_cursor` (checkpoint rewound, next poll
+re-reads from the start; harmless), `upstream_error`, `network_error`,
+`timeout`, `malformed_response`, `unexpected_status:<code>`, `internal_error` (an
+unexpected failure inside that project's poll; other projects keep polling). A failing project
+is polled less often (backoff up to 32 intervals) until a poll succeeds.
+Changing a project's `ingest_config` resets its checkpoint.
+
+Acceptance walk: [`docs/sonicgrid-ingest-acceptance.md`](sonicgrid-ingest-acceptance.md).
+
 ## 8. Backups
 
 All state is one SQLite file plus re-creatable caches. Either:

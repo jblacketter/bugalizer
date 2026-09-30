@@ -6,6 +6,30 @@ This log tracks important decisions made during the project.
 
 ---
 
+## 2026-09-29: Pull-based sonicgrid ingest (Phase 10 / B1)
+
+**Decision:** Bugalizer pulls sonicgrid bug reports from S0's `GET
+/api/bugalizer/bug-reports` with a background poller (`BUGALIZER_INGEST_ENABLED`, off by
+default) and writes nothing back. Imports are idempotent by `(project_id, external_id)`; the
+opaque cursor follows the contract's rules; reconciliation is a periodic full re-walk with its
+own resumable cursor (a cursor "some minutes behind" cannot be built from an opaque one); every
+import and checkpoint write is one transaction fenced by `projects.ingest_generation`, so a
+config change, clear or delete during a poll cannot be undone by stale work.
+
+**Context:** Sonicgrid runs on Vercel and cannot reach BOWIE (S0 rescope, Greg 2026-09-12). S0
+hosted acceptance passed 2026-09-30 (sonicgrid `551342c7`).
+
+**Arbiter decisions (Jack, 2026-09-29):** **D-A** B1 lands before Phase 9 (private-repo
+access); imported reports localize against the hand-refreshed BOWIE clone until then. **D-B**
+the reporter's email is dropped at the mapping boundary and never stored or logged; `reporter`
+is the name. **D-C** acceptance on BOWIE with the real token.
+
+**Decided By:** Human (jack) + claude; codex APPROVE (plan round 2)
+
+**Phase:** 10 (sonicgrid-ingest)
+
+---
+
 ## 2026-09-17: Open-PR write policy and the single-process claim (Phase 8 / B2)
 
 **Decision:** `POST /reports/{id}/open-pr` is the only code that writes to a remote, under a

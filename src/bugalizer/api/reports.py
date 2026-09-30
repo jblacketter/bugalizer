@@ -97,6 +97,9 @@ def _row_to_response(row: dict, warnings: list[str] | None = None) -> BugReportR
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         warnings=warnings or [],
+        attachments=row.get("attachments"),
+        ingest_source=row.get("ingest_source"),
+        external_id=row.get("external_id"),
     )
 
 
