@@ -88,11 +88,15 @@ tests/
 - **Phase 8 (open-pr, B2): MERGED 2026-09-18 (PR #5), acceptance pending** (token from repo owner; `docs/open-pr-acceptance.md`): `POST /reports/{id}/open-pr` turns a
   proposal into a PR on `fix/bugalizer-<id>` (never merge, never force, one PR per report);
   `BUGALIZER_GITHUB_TOKEN`; `scripts/windows/open-pr-smoke.ps1` for the BOWIE acceptance walk.
-- **Phase 10 (sonicgrid-ingest, B1): IMPLEMENTED, codex-approved 2026-09-30 (impl round 2), merge + BOWIE acceptance pending** (`docs/phases/sonicgrid-ingest.md`):
+- **Phase 10 (sonicgrid-ingest, B1): IMPLEMENTED, codex-approved 2026-09-30 (impl round 2), MERGED (PRs #6, #7); BOWIE live 2026-09-30** (`docs/phases/sonicgrid-ingest.md`):
   background poller pulls sonicgrid bug reports from S0's poll endpoint into the queue
   (`BUGALIZER_INGEST_ENABLED`, off by default; token in `SONICGRID_POLL_TOKEN`); idempotent by
   `external_id`; generation-fenced checkpoint in `ingest_state`; resumable reconciliation re-walk;
   `GET/POST /projects/{id}/ingest[/run]`. Nothing is written back to sonicgrid.
+  BOWIE: `scripts/windows/configure-sonicgrid-ingest.ps1` prints CONFIGURED; a real sonicgrid report
+  was imported once and a re-poll imported 0. Gotcha: a project's own `llm_model` overrides the
+  `BUGALIZER_DEFAULT_*_MODEL` env defaults (clear it with PATCH `{"llm_model": ""}`); BOWIE runs
+  `gemma4:12b` (triage) + `qwen2.5-coder:14b` (localize), `qwen2.5-coder:7b` is not installed.
 
 ## Handoff Workflow
 Uses tagteam: claude (lead) ↔ codex (reviewer). Read `tagteam.yaml` and `handoff-state.json`,
