@@ -16,8 +16,10 @@ $P = "<sonicgrid project id>"
 
 1. **Configure.** In BOWIE's `.env`: `BUGALIZER_INGEST_ENABLED=true`,
    `SONICGRID_POLL_TOKEN=<same value as Vercel's BUGALIZER_POLL_TOKEN>`. Restart
-   the service (LAN Service Manager, `lan-mgr-bugalizer`). Set the project's
-   ingest config (PATCH in §7c).
+   the service (LAN Service Manager, `lan-mgr-bugalizer`). Then set the
+   project's ingest config and run a first poll:
+   `powershell -ExecutionPolicy Bypass -File scripts\windows\configure-sonicgrid-ingest.ps1`
+   (must print `CONFIGURED`; this also covers step 2).
 2. **Credential and first poll.**
    `Invoke-RestMethod "$B/projects/$P/ingest" -Headers $h` shows
    `credential_present: true`. Within one interval (2 min), or after

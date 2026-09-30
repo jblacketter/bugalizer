@@ -267,7 +267,15 @@ Setup, once:
    rotated value takes effect on the next poll. Unknown `BUGALIZER_*` keys in
    `.env` are ignored and named (not valued) in a startup warning — check the
    log after editing `.env`.
-2. Point the sonicgrid project at the endpoint (API key required):
+2. Point the sonicgrid project at the endpoint. On BOWIE, one command does it,
+   runs one poll and prints a verdict (`CONFIGURED`, or `NOT CONFIGURED` with
+   the reason); the API key is read from `.env`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\configure-sonicgrid-ingest.ps1
+```
+
+   Or by hand (API key required):
 
 ```powershell
 $h = @{ "X-API-Key" = "<key>" }
