@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, Optional, Sequence, TypeVar
 
 from bugalizer.config import settings
 
@@ -183,6 +183,31 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.commit()
             logger.info("Migration: added fix_proposals.%s column", column)
 
+    # Phase 10 (sonicgrid-ingest): imported-report identity, and the ingest
+    # generation that fences in-flight polls against config changes.
+    if "ingest_source" not in br_columns:
+        conn.execute("ALTER TABLE bug_reports ADD COLUMN ingest_source TEXT")
+        conn.commit()
+        logger.info("Migration: added bug_reports.ingest_source column")
+    if "external_id" not in br_columns:
+        conn.execute("ALTER TABLE bug_reports ADD COLUMN external_id TEXT")
+        conn.commit()
+        logger.info("Migration: added bug_reports.external_id column")
+    if "ingest_generation" not in columns:
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN ingest_generation INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.commit()
+        logger.info("Migration: added projects.ingest_generation column")
+    br_columns = {row[1] for row in conn.execute("PRAGMA table_info(bug_reports)").fetchall()}
+    if {"project_id", "external_id"} <= br_columns:
+        # The idempotency key for imports (ingest_commit's ON CONFLICT target).
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_bug_reports_external "
+            "ON bug_reports(project_id, external_id) WHERE external_id IS NOT NULL"
+        )
+        conn.commit()
+
 
 _now_lock = threading.Lock()
 _last_now_dt: Optional[datetime] = None
@@ -230,6 +255,7 @@ CREATE TABLE IF NOT EXISTS projects (
     fix_llm_model TEXT,
     ingest_source TEXT,
     ingest_config TEXT,
+    ingest_generation INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -254,6 +280,8 @@ CREATE TABLE IF NOT EXISTS bug_reports (
     claim_token TEXT,
     resolution_reason TEXT,
     assigned_to TEXT,
+    ingest_source TEXT,
+    external_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -317,6 +345,22 @@ CREATE TABLE IF NOT EXISTS token_usage (
 );
 
 CREATE INDEX IF NOT EXISTS idx_token_usage_project ON token_usage(project_id);
+
+-- Phase 10 (sonicgrid-ingest): per-project poll checkpoint. `generation` is
+-- the projects.ingest_generation this row belongs to (see ingest_commit).
+CREATE TABLE IF NOT EXISTS ingest_state (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL,
+    cursor TEXT,
+    rewalk_cursor TEXT,
+    rewalk_started_at TEXT,
+    last_full_walk_at TEXT,
+    last_poll_at TEXT,
+    last_ok_at TEXT,
+    last_error TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    imported_total INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -380,12 +424,27 @@ def project_update(project_id: str, **fields: Any) -> Optional[dict[str, Any]]:
     existing = project_get(project_id)
     if not existing:
         return None
+    # Phase 10: a change to the ingest source or config invalidates the poll
+    # checkpoint (a cursor from one source means nothing to another) and any
+    # poll already in flight. Bump the generation and drop the state row in
+    # the same transaction as the update; ingest_commit fences on it.
+    ingest_changed = False
+    if "ingest_source" in fields or "ingest_config" in fields:
+        new_source = fields.get("ingest_source", existing.get("ingest_source"))
+        new_config = fields.get("ingest_config", existing.get("ingest_config"))
+        ingest_changed = (new_source, new_config) != (
+            existing.get("ingest_source"), existing.get("ingest_config")
+        )
     if isinstance(fields.get("ingest_config"), dict):
         fields["ingest_config"] = json.dumps(fields["ingest_config"])
     fields["updated_at"] = _now()
     set_clause = ", ".join(f"{k} = ?" for k in fields)
+    if ingest_changed:
+        set_clause += ", ingest_generation = ingest_generation + 1"
     values = list(fields.values()) + [project_id]
     conn.execute(f"UPDATE projects SET {set_clause} WHERE id = ?", values)
+    if ingest_changed:
+        conn.execute("DELETE FROM ingest_state WHERE project_id = ?", (project_id,))
     conn.commit()
     return project_get(project_id)
 
@@ -413,6 +472,8 @@ def project_delete(project_id: str) -> bool | str:
         "DELETE FROM bug_reports WHERE project_id = ? AND resolution_reason = 'deleted'",
         (project_id,),
     )
+    # Phase 10: the FK cascades too, but deletion must not depend on the pragma.
+    conn.execute("DELETE FROM ingest_state WHERE project_id = ?", (project_id,))
     conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
     conn.commit()
     return True
@@ -1507,3 +1568,129 @@ def token_usage_summary(project_id: Optional[str] = None) -> dict[str, Any]:
         "by_provider": by_provider,
         "attribution": attribution,
     }
+
+
+# ---------------------------------------------------------------------------
+# Ingest (Phase 10 / B1 sonicgrid-ingest)
+# ---------------------------------------------------------------------------
+
+# Columns of ingest_state a poll may set directly (imported_total and
+# consecutive_failures move only through ingest_commit's counters).
+_INGEST_STATE_FIELDS = frozenset({
+    "cursor", "rewalk_cursor", "rewalk_started_at", "last_full_walk_at",
+    "last_poll_at", "last_ok_at", "last_error", "consecutive_failures",
+})
+
+
+def projects_with_ingest() -> list[dict[str, Any]]:
+    """Projects that have an ingest source configured, oldest first."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM projects WHERE ingest_source IS NOT NULL ORDER BY created_at"
+    ).fetchall()
+    return [_project_row(r) for r in rows]
+
+
+def ingest_state_get(project_id: str) -> Optional[dict[str, Any]]:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM ingest_state WHERE project_id = ?", (project_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def ingest_health_counts() -> dict[str, int]:
+    """Aggregate, non-identifying ingest counts for the public /health."""
+    conn = _get_conn()
+    projects = conn.execute(
+        "SELECT COUNT(*) FROM projects WHERE ingest_source IS NOT NULL"
+    ).fetchone()[0]
+    failing = conn.execute(
+        """SELECT COUNT(*) FROM ingest_state s JOIN projects p ON p.id = s.project_id
+           WHERE p.ingest_source IS NOT NULL AND s.last_error IS NOT NULL"""
+    ).fetchone()[0]
+    return {"projects": projects, "failing": failing}
+
+
+@retry_on_locked
+def ingest_commit(
+    project_id: str,
+    generation: int,
+    *,
+    reports: Sequence[dict[str, Any]] = (),
+    updates: Optional[dict[str, Any]] = None,
+    count_failure: bool = False,
+) -> Optional[int]:
+    """Write one poll step — imported reports plus checkpoint/bookkeeping
+    updates — in a single transaction fenced by the ingest generation.
+
+    The poll captured `generation` (projects.ingest_generation) after taking
+    its lock. A config change, clear or project delete since then bumps or
+    removes it; the fence then rolls back with nothing written and returns
+    None, so a slow in-flight poll can never import old-source rows or
+    recreate a reset checkpoint. Otherwise returns the number of reports
+    inserted (existing (project_id, external_id) pairs are skipped).
+
+    Because imports and checkpoint commit together, a failure mid-page leaves
+    both untouched; the page replays and is never skipped.
+    """
+    updates = dict(updates or {})
+    unknown = set(updates) - _INGEST_STATE_FIELDS
+    if unknown:
+        raise ValueError(f"unknown ingest_state fields: {sorted(unknown)}")
+    conn = _get_conn()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT ingest_generation, ingest_source FROM projects WHERE id = ?",
+            (project_id,),
+        ).fetchone()
+        if row is None or row["ingest_source"] is None or row["ingest_generation"] != generation:
+            conn.rollback()
+            return None
+        now = _now()
+        conn.execute(
+            "DELETE FROM ingest_state WHERE project_id = ? AND generation != ?",
+            (project_id, generation),
+        )
+        # A new checkpoint counts its creation as the last full walk: the
+        # first forward walk starts from the beginning anyway, so the first
+        # reconciliation re-walk is due one interval later, not immediately.
+        conn.execute(
+            """INSERT INTO ingest_state (project_id, generation, last_full_walk_at)
+               VALUES (?, ?, ?) ON CONFLICT(project_id) DO NOTHING""",
+            (project_id, generation, now),
+        )
+        inserted = 0
+        for r in reports:
+            cur = conn.execute(
+                """INSERT INTO bug_reports
+                   (id, project_id, title, description, reporter, severity,
+                    environment, attachments, labels, status, analysis_mode,
+                    ingest_source, external_id, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'auto', ?, ?, ?, ?)
+                   ON CONFLICT(project_id, external_id) WHERE external_id IS NOT NULL
+                   DO NOTHING""",
+                (
+                    _new_id(), project_id, r["title"], r["description"], r["reporter"],
+                    r.get("severity", "medium"), r.get("environment"),
+                    _serialize_json(r.get("attachments")), _serialize_json(r.get("labels")),
+                    r["ingest_source"], r["external_id"], _now(), _now(),
+                ),
+            )
+            inserted += cur.rowcount
+        sets = [f"{k} = ?" for k in updates]
+        values: list[Any] = list(updates.values())
+        sets.append("imported_total = imported_total + ?")
+        values.append(inserted)
+        if count_failure:
+            sets.append("consecutive_failures = consecutive_failures + 1")
+        conn.execute(
+            f"UPDATE ingest_state SET {', '.join(sets)} WHERE project_id = ?",
+            values + [project_id],
+        )
+        conn.commit()
+        return inserted
+    except BaseException:
+        conn.rollback()
+        raise

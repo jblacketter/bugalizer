@@ -6,6 +6,7 @@ import os
 
 from typing import Optional
 
+from dotenv import dotenv_values
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings
 
@@ -99,15 +100,35 @@ class Settings(BaseSettings):
     github_web_base: str = "https://github.com"
     github_api_base: str = "https://api.github.com"
 
+    # Ingest (Phase 10 / B1): pull bug reports from each project with an
+    # `ingest_source` (sonicgrid's poll endpoint). OFF by default; BOWIE turns
+    # it on. The poll token lives in the env var the project's
+    # `ingest_config.credential_env` names (SONICGRID_POLL_TOKEN), never here.
+    ingest_enabled: bool = False
+    ingest_poll_seconds: int = 120
+    ingest_page_limit: int = 100          # `limit` sent per request (1..200)
+    ingest_max_pages: int = 20            # forward pages per project per tick
+    ingest_rewalk_hours: float = 6.0      # reconciliation re-walk interval
+    ingest_rewalk_pages: int = 5          # re-walk pages per project per tick
+    ingest_timeout_seconds: float = 30.0
+
     # `.env` in the working directory is read on startup (§5.5 native-service
     # deploys); real environment variables always take precedence over it.
     # The path is overridable via BUGALIZER_ENV_FILE so the test suite can
     # disable it (set empty) — a deploy `.env` living in the repo root must not
     # leak local overrides into tests.
+    #
+    # `extra: ignore` (Phase 10): the deployment `.env` also carries
+    # credentials that are not settings (SONICGRID_POLL_TOKEN, named by a
+    # project's ingest_config.credential_env). The default `forbid` refused to
+    # start on them and echoed their values in the error. They are read by
+    # `resolve_env_credential` instead; unknown BUGALIZER_* keys are reported
+    # by name at startup (`unknown_env_file_settings`).
     model_config = {
         "env_prefix": "BUGALIZER_",
         "env_file": os.environ.get("BUGALIZER_ENV_FILE", ".env") or None,
         "env_file_encoding": "utf-8",
+        "extra": "ignore",
     }
 
     @model_validator(mode="after")
@@ -160,6 +181,45 @@ class Settings(BaseSettings):
         if not self.cors_origins.strip():
             return []
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+
+def _env_file_values() -> dict[str, Optional[str]]:
+    """The deployment `.env` as a dict, read fresh (same path rule as
+    Settings: BUGALIZER_ENV_FILE, default `.env`, empty = none). Never copied
+    into os.environ; empty on any read problem."""
+    path = os.environ.get("BUGALIZER_ENV_FILE", ".env")
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        return dict(dotenv_values(path, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def resolve_env_credential(name: str) -> Optional[str]:
+    """A host credential named by config (e.g. ingest_config.credential_env).
+
+    The real process environment wins, as it does for Settings; otherwise the
+    deployment `.env`. Read at call time, never cached or stored, so a rotated
+    value takes effect on the next use. Blank = None.
+    """
+    if name in os.environ:
+        value = os.environ[name]
+    else:
+        value = _env_file_values().get(name)
+    value = (value or "").strip()
+    return value or None
+
+
+def unknown_env_file_settings() -> list[str]:
+    """Names (never values) of BUGALIZER_* keys in the `.env` that match no
+    setting — a typo `extra: ignore` would otherwise drop silently."""
+    known = {f"BUGALIZER_{name.upper()}" for name in Settings.model_fields}
+    known.add("BUGALIZER_ENV_FILE")
+    return sorted(
+        key for key in _env_file_values()
+        if key.upper().startswith("BUGALIZER_") and key.upper() not in known
+    )
 
 
 settings = Settings()

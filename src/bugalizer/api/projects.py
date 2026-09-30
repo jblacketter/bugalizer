@@ -7,8 +7,9 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 
 from bugalizer.auth import require_api_key
-from bugalizer.config import settings
+from bugalizer.config import resolve_env_credential, settings
 from bugalizer.db import (
+    ingest_state_get,
     project_create,
     project_delete,
     project_get,
@@ -16,6 +17,8 @@ from bugalizer.db import (
     project_update,
 )
 from bugalizer.models import (
+    IngestRunResponse,
+    IngestStatusResponse,
     ProjectCreate,
     ProjectListResponse,
     ProjectResponse,
@@ -260,4 +263,61 @@ async def get_repo_map(
         sha=repo_map.sha,
         file_count=len(repo_map.files),
         text=repo_map.text,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ingest (Phase 10 / B1)
+# ---------------------------------------------------------------------------
+
+def _ingest_project(project_id: str) -> dict:
+    project = project_get(project_id)
+    if not project or not project.get("ingest_source") or not isinstance(
+        project.get("ingest_config"), dict
+    ):
+        raise HTTPException(status_code=404, detail="Project has no ingest source")
+    return project
+
+
+@router.get("/projects/{project_id}/ingest")
+def get_ingest_status(
+    project_id: str,
+    _key: str = Depends(require_api_key),
+) -> IngestStatusResponse:
+    """Ingest checkpoint and health for one project. Presence flags only: the
+    poll credential and the opaque cursor are never returned."""
+    project = _ingest_project(project_id)
+    state = ingest_state_get(project_id) or {}
+    if state and state.get("generation") != project.get("ingest_generation"):
+        state = {}
+    credential_env = project["ingest_config"].get("credential_env") or ""
+    return IngestStatusResponse(
+        enabled=settings.ingest_enabled,
+        ingest_source=project["ingest_source"],
+        credential_present=resolve_env_credential(credential_env) is not None,
+        cursor_present=state.get("cursor") is not None,
+        rewalk_in_progress=state.get("rewalk_started_at") is not None,
+        last_poll_at=state.get("last_poll_at"),
+        last_ok_at=state.get("last_ok_at"),
+        last_error=state.get("last_error"),
+        consecutive_failures=state.get("consecutive_failures") or 0,
+        last_full_walk_at=state.get("last_full_walk_at"),
+        imported_total=state.get("imported_total") or 0,
+    )
+
+
+@router.post("/projects/{project_id}/ingest/run")
+async def run_ingest(
+    project_id: str,
+    full: bool = False,
+    _key: str = Depends(require_api_key),
+) -> IngestRunResponse:
+    """Poll this project now (works with the background poller disabled).
+    `full=true` starts a reconciliation re-walk if none is in progress."""
+    from bugalizer.ingest.poller import poll_project
+
+    _ingest_project(project_id)
+    outcome = await poll_project(project_id, full=full)
+    return IngestRunResponse(
+        imported=outcome.imported, pages=outcome.pages, last_error=outcome.error
     )
