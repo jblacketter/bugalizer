@@ -413,6 +413,33 @@ Where the code settles details the plan left open, or differs from it in detail:
   fails when that file runs after it out of the default order (it fails the same way on
   `main`). The default full-suite order passes.
 
+## Implementation notes (impl round 2)
+
+Codex impl r1 found two P1s; PR #10 had already merged, so these land as a follow-up.
+
+- **Refusals never get an `intent` row.** Authorization runs before any ledger write past
+  `reserved`; a refusal is finished straight from `reserved` in one write. Recovery only
+  dispatches `intent`/`dispatched` rows, which therefore always mean "authorized". A crash
+  before the refusal write leaves the row `reserved`; the next tick re-claims
+  (`changed:false`) and re-authorizes.
+- **The time bound is local.** `expire_overdue()` runs at the start of every background
+  tick (for projects in backoff too) and of every project tick before any HTTP; a task
+  re-checks the bound when its stage returns and `_run_pr` re-checks it before calling
+  open-pr. An overdue completion records `late_outcome` only; the slot is still held until
+  the task exits, and the drain posts the `failed` outcome once sonicgrid answers.
+
+## Implementation notes (impl round 3)
+
+- **The PR step is a tracked task too.** Standalone `open_pr`, a recovered `fix_done`
+  step and an adopted-evidence PR step run as tasks holding their (non-LLM) slot until
+  the call exits, as LLM actions do; the tick no longer waits on GitHub, so its expiry
+  sweep and `_handle`'s running-task check keep applying the bound. Their terminal is
+  posted by the next tick's drain (one tick later than before).
+- **Re-check after the call.** `_run_pr` re-checks the bound after `pr_step` returns,
+  before recording an outcome or counting an attempt; an overdue answer goes to
+  `late_outcome` (`pr_pending` for a non-outcome) and no further attempt is scheduled.
+  The compound timeout keeps the completed fix step (`done`/`failed`).
+
 ## Files
 
 - New: `src/bugalizer/sync/__init__.py`, `sync/triage_sync.py` (task, HTTP, walk,

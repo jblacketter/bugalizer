@@ -1987,6 +1987,17 @@ def triage_actions_unacked(project_id: str) -> list[dict[str, Any]]:
     return [_triage_action_row(r) for r in rows]
 
 
+def triage_actions_open(project_id: Optional[str] = None) -> list[dict[str, Any]]:
+    """Authorized, unfinished actions (intent, dispatched, fix_done)."""
+    conn = _get_conn()
+    query = ("SELECT * FROM triage_actions WHERE phase IN ('intent', 'dispatched', 'fix_done')")
+    params: list[Any] = []
+    if project_id is not None:
+        query += " AND project_id = ?"
+        params.append(project_id)
+    return [_triage_action_row(r) for r in conn.execute(query, params).fetchall()]
+
+
 def triage_action_counts(project_id: str) -> dict[str, int]:
     conn = _get_conn()
     counts = {

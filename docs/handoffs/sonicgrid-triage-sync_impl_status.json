@@ -1,7 +1,7 @@
 {
-  "state": "in-progress",
-  "ready_for": "lead",
-  "round": 1,
+  "state": "approved",
+  "ready_for": null,
+  "round": 3,
   "phase": "sonicgrid-triage-sync",
   "type": "impl",
   "lead": "claude",

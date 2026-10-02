@@ -199,8 +199,9 @@ tree-sitter / uv
 - **Depends on:** Phase 7
 
 ### Phase 11: sonicgrid-triage-sync
-- **Status:** B3, implemented 2026-10-01, impl in review (plan codex-approved round 3;
-  `docs/phases/sonicgrid-triage-sync.md`). Acceptance on BOWIE after merge:
+- **Status:** B3, impl codex-approved 2026-10-02 (impl round 3; plan round 3;
+  `docs/phases/sonicgrid-triage-sync.md`). PR #10 merged before review; the r1/r2 fixes
+  are on branch `phase-11/review-fixes` (merge that before enabling the sync on BOWIE). Acceptance on BOWIE after merge:
   `docs/sonicgrid-triage-acceptance.md`. Direction:
   `~/projects/QA/docs/bugalizer-sonicgrid-triage-direction-2026-09-30.html`
   (rulings E1 to E6, Jack; first users Jack and Dan). Pairs with
