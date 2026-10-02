@@ -306,6 +306,74 @@ Changing a project's `ingest_config` resets its checkpoint.
 
 Acceptance walk: [`docs/sonicgrid-ingest-acceptance.md`](sonicgrid-ingest-acceptance.md).
 
+## 7d. Results and actions in sonicgrid (Phase 11)
+
+The other direction, still with BOWIE calling out only (contract: sonicgrid
+`documentation/BUGALIZER-TRIAGE-ENDPOINTS.md`). With
+`BUGALIZER_TRIAGE_SYNC_ENABLED=true`, every `BUGALIZER_TRIAGE_SYNC_SECONDS` (15)
+Bugalizer:
+
+- **pushes** each sonicgrid-sourced report's current picture (status, triage
+  summary, severity, PR link; for admins also root cause, files and diff) to
+  `PUT /api/bugalizer/results/{bugId}`, whenever it changed;
+- **pulls** the actions sonicgrid admins queued (`GET /api/bugalizer/actions`)
+  and runs them here: Analyze (local), Analyze (cloud), Fix and open PR,
+  Open PR, set mode, close. It reports each one back as done, failed or
+  refused, with a message sonicgrid shows.
+
+Who may spend: everyone may run BOWIE's local models. **Analyze (cloud)** is
+refused unless the requester's sonicgrid email is in
+`BUGALIZER_SONICGRID_CLOUD_USERS`. **Fix and open PR** needs that only when the
+Stage 4 provider is paid (not `ollama`). **Analyze (local)** from sonicgrid runs
+only on local models: it is refused for everyone if the project's
+`llm_provider` is not `ollama`. Cloud runs started from sonicgrid use this
+box's own key and are attributed in `/api/v1/usage` as
+`key_source=env`, `key_ref=sonicgrid:<userId>`.
+
+Limits and timing: one LLM action at a time (`BUGALIZER_TRIAGE_MAX_CONCURRENT`),
+one action per report; others wait in sonicgrid as pending. A claimed action
+that has not finished `BUGALIZER_TRIAGE_ACTION_TIMEOUT_MINUTES` (45) after it
+was authorized is reported **failed, "timed out after 45 min"**; if the work
+finishes later, its outcome is kept in the ledger only and a PR step is not
+started. After a restart, a cloud action whose dispatch cannot be confirmed is
+reported failed and is **not** retried automatically (no second charge);
+local actions are retried.
+
+Only one Bugalizer may sync a given sonicgrid: a second project with the same
+source is refused (`409 triage_source_in_use`), and two Bugalizer instances
+against one sonicgrid are unsupported.
+
+Setup, once:
+
+1. `.env`: `BUGALIZER_TRIAGE_SYNC_ENABLED=true`,
+   `SONICGRID_TRIAGE_TOKEN=<same value as BUGALIZER_TRIAGE_TOKEN in Vercel
+   production>`, `BUGALIZER_SONICGRID_CLOUD_USERS=<allowlisted emails>`. Restart.
+2. Name the triage token on the sonicgrid project (the poll settings and B1's
+   checkpoint are kept). This runs one real tick, so check sonicgrid's
+   open-action list first:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\configure-sonicgrid-triage.ps1
+```
+
+Operate:
+
+- `GET /api/v1/projects/{id}/triage-sync` — `credential_present`,
+  `last_ok_at`, `last_error`, action counts by ledger phase, results pending,
+  report ids whose last push was rejected, `terminal_errors`.
+- `POST /api/v1/projects/{id}/triage-sync/run` — one tick now (`409
+  tick_in_progress` if one is running).
+- `/health` shows only `triage_sync: {enabled, projects, failing}`.
+
+`last_error` values: `unauthorized` (token mismatch; the poll token is not
+accepted here), `source_not_configured` (no `BUGALIZER_TRIAGE_TOKEN` in Vercel
+production), `credential_missing`, `duplicate_triage_source`,
+`upstream_error`, `network_error`, `timeout`, `malformed_response`,
+`unexpected_status:<code>`, `internal_error`. Auth and network failures back
+off up to 32 ticks.
+
+Acceptance walk: [`docs/sonicgrid-triage-acceptance.md`](sonicgrid-triage-acceptance.md).
+
 ## 8. Backups
 
 All state is one SQLite file plus re-creatable caches. Either:

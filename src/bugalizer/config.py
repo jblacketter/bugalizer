@@ -112,6 +112,20 @@ class Settings(BaseSettings):
     ingest_rewalk_pages: int = 5          # re-walk pages per project per tick
     ingest_timeout_seconds: float = 30.0
 
+    # Triage sync (Phase 11 / B3): push results to sonicgrid and run the
+    # actions its admins queue (sonicgrid documentation/BUGALIZER-TRIAGE-
+    # ENDPOINTS.md). OFF by default. Per project it also needs
+    # `ingest_config.triage_credential_env` (SONICGRID_TRIAGE_TOKEN), whose
+    # value lives in that env var, never here.
+    triage_sync_enabled: bool = False
+    triage_sync_seconds: int = 15
+    triage_action_timeout_minutes: float = 45.0   # per action, from its intent
+    triage_max_concurrent: int = 1                # LLM actions at once (one GPU)
+    triage_push_per_tick: int = 20                # result pushes per project per tick
+    # Sonicgrid emails allowed cloud-tier actions (E4), comma-separated. Empty
+    # = nobody; everyone may still run local models.
+    sonicgrid_cloud_users: str = ""
+
     # `.env` in the working directory is read on startup (§5.5 native-service
     # deploys); real environment variables always take precedence over it.
     # The path is overridable via BUGALIZER_ENV_FILE so the test suite can
@@ -175,6 +189,12 @@ class Settings(BaseSettings):
             return None
         value = self.github_token.get_secret_value().strip()
         return value or None
+
+    def sonicgrid_cloud_user_set(self) -> set[str]:
+        """Allowlisted sonicgrid emails, case-folded (empty set = nobody)."""
+        return {
+            e.strip().casefold() for e in self.sonicgrid_cloud_users.split(",") if e.strip()
+        }
 
     def cors_origin_list(self) -> list[str]:
         """Return the configured CORS origins (empty list = closed)."""

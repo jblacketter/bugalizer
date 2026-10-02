@@ -42,6 +42,10 @@ src/bugalizer/
   ingest/
     sonicgrid.py   # Poll-endpoint response parsing + report mapping (pure; email dropped)
     poller.py      # Ingest poller: forward walk, reconciliation re-walk, backoff (Phase 10)
+  sync/
+    triage_sync.py # Triage sync tick: action walk, ledger recovery, terminal drain, results push (Phase 11)
+    actions.py     # Action executor: authorization (allowlist, pins), kinds, open-pr step, evidence
+    results.py     # Result payload builder + fingerprint (pure)
   git_ops/
     repo.py        # Git clone, pull, SHA, file listing via subprocess
     pull_request.py # open-pr: detached worktree commit, guarded push, GitHub PR (Phase 8)
@@ -59,6 +63,7 @@ tests/
   test_fix_proposer.py # Stage 4: proposals, retry classification, override + key secrecy
   test_open_pr.py  # open-pr against a real git http-backend + mock GitHub API
   test_ingest.py   # ingest poller against a fake sonicgrid (cursor rules, re-walk, fencing, secrecy)
+  test_triage_sync.py # triage sync against a fake sonicgrid (push, kinds, allowlist, recovery, secrecy)
 ```
 
 ## Architecture
@@ -97,6 +102,13 @@ tests/
   was imported once and a re-poll imported 0. Gotcha: a project's own `llm_model` overrides the
   `BUGALIZER_DEFAULT_*_MODEL` env defaults (clear it with PATCH `{"llm_model": ""}`); BOWIE runs
   `gemma4:12b` (triage) + `qwen2.5-coder:14b` (localize), `qwen2.5-coder:7b` is not installed.
+
+- **Phase 11 (sonicgrid-triage-sync, B3): IMPLEMENTED 2026-10-01, impl in review** (`docs/phases/sonicgrid-triage-sync.md`):
+  pushes each sonicgrid-sourced report's results to sonicgrid and runs the actions its admins queue
+  (contract: sonicgrid `documentation/BUGALIZER-TRIAGE-ENDPOINTS.md`). Off by default
+  (`BUGALIZER_TRIAGE_SYNC_ENABLED`); per project `ingest_config.triage_credential_env`
+  (`SONICGRID_TRIAGE_TOKEN`). Durable `triage_actions` ledger, `trigger_ref` tags on stage rows,
+  cloud allowlist `BUGALIZER_SONICGRID_CLOUD_USERS`. BOWIE walk: `docs/sonicgrid-triage-acceptance.md`.
 
 ## Handoff Workflow
 Uses tagteam: claude (lead) ↔ codex (reviewer). Read `tagteam.yaml` and `handoff-state.json`,

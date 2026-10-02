@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Optional
 
 from bugalizer.db import (
@@ -17,11 +18,25 @@ from bugalizer.db import (
     try_claim_report,
 )
 from bugalizer.models import LLMOverride
-from bugalizer.pipeline.fix_proposer import propose_fix
+from bugalizer.pipeline.fix_proposer import FixOutcome, propose_fix
 from bugalizer.pipeline.triage import triage_report
 from bugalizer.pipeline.validator import validate_report
 
 logger = logging.getLogger(__name__)
+
+# (provider, model) pinned by a caller (Phase 11 triage sync) for one stage.
+LLMPin = tuple[str, str]
+
+
+class LocalOutcome(str, Enum):
+    """What a local stage run did (Phase 11, D-E). Worker and API callers
+    ignore it; the triage sync maps it onto an action outcome."""
+    COMPLETED = "completed"          # a localization was written
+    FAILED = "failed"                # the stage ran and failed
+    NOT_CLAIMED = "not_claimed"      # another run held the report; nothing ran
+    NO_REPO = "no_repo"              # project not cloned; nothing ran
+    ALREADY_FRESH = "already_fresh"  # localization already current for HEAD
+    TRIAGE_ONLY = "triage_only"      # triage ran and asked for clarification
 
 
 async def process_submitted(report_id: str) -> None:
@@ -76,39 +91,56 @@ async def process_submitted(report_id: str) -> None:
             try_claim_report(report_id, "validating", "submitted")
 
 
-async def process_triaged(report_id: str) -> None:
+async def process_triaged(
+    report_id: str,
+    *,
+    llm: Optional[LLMPin] = None,
+    trigger_ref: Optional[str] = None,
+) -> bool:
     """Process a triaged report through Stage 2 (triage/classification).
 
     Atomically claims the report (triaged -> analyzing), runs LLM triage
     (lock NOT held during network I/O), then writes results under lock.
+
+    `llm` pins (provider, model) instead of resolving from the project, and
+    `trigger_ref` tags the rows (Phase 11). Returns whether triage ran.
     """
     async with db_write_lock:
         claimed = try_claim_report(report_id, "triaged", "analyzing")
     if not claimed:
         logger.debug("Report %s already claimed for analysis", report_id)
-        return
+        return False
 
     report = report_get(report_id)
     if not report:
         logger.warning("Report %s not found after claim", report_id)
-        return
+        return False
 
+    provider, model = llm if llm is not None else (None, None)
     try:
         # triage_report handles its own DB writes internally.
         # The LLM call happens outside db_write_lock.
-        await triage_report(report)
+        await triage_report(report, model=model, provider=provider, trigger_ref=trigger_ref)
         logger.info("Report %s triage complete", report_id)
 
     except Exception as e:
         logger.error("Triage failed for report %s: %s", report_id, e)
         # triage_report already rolls back to triaged on failure
+    return True
 
 
-async def process_localization(report_id: str) -> None:
+async def process_localization(
+    report_id: str,
+    *,
+    llm: Optional[LLMPin] = None,
+    trigger_ref: Optional[str] = None,
+) -> LocalOutcome:
     """Process a triaged report through Stage 3 (localization).
 
     Uses asyncio.to_thread() for blocking git/AST/file operations.
     LLM calls are already async. DB writes are under db_write_lock.
+
+    `llm` / `trigger_ref`: see `process_triaged`.
     """
     from bugalizer.git_ops.repo import get_head_sha
     from bugalizer.pipeline.repo_map import get_repo_map_cache
@@ -119,19 +151,19 @@ async def process_localization(report_id: str) -> None:
         claimed = try_claim_report(report_id, "triaged", "analyzing")
     if not claimed:
         logger.debug("Report %s already claimed for localization", report_id)
-        return
+        return LocalOutcome.NOT_CLAIMED
 
     report = report_get(report_id)
     if not report:
         logger.warning("Report %s not found after claim", report_id)
-        return
+        return LocalOutcome.NOT_CLAIMED
 
     project = project_get(report["project_id"])
     if not project or not project.get("repo_path"):
         logger.info("Report %s project has no repo, skipping localization", report_id)
         async with db_write_lock:
             report_update_status(report_id, "triaged")
-        return
+        return LocalOutcome.NO_REPO
 
     repo_path = project["repo_path"]
     branch = project.get("default_branch", "main")
@@ -154,7 +186,7 @@ async def process_localization(report_id: str) -> None:
                                 report_id, sha[:8])
                     async with db_write_lock:
                         report_update_status(report_id, "triaged")
-                    return
+                    return LocalOutcome.ALREADY_FRESH
 
         # Build/retrieve repo map (blocking CPU/IO -> to_thread)
         cache = get_repo_map_cache()
@@ -171,7 +203,7 @@ async def process_localization(report_id: str) -> None:
         # Resolve local provider/model from the project (§5.3: llm_provider/
         # llm_model scope local stages only; Stage 4 has its own namespace).
         from bugalizer.llm.client import resolve_local_llm
-        provider, model = resolve_local_llm(project, stage="localize")
+        provider, model = llm if llm is not None else resolve_local_llm(project, stage="localize")
 
         # Run localization (LLM calls are async, file reads use to_thread internally)
         await localize_report(
@@ -182,6 +214,7 @@ async def process_localization(report_id: str) -> None:
             model=model,
             provider=provider,
             triage_summary=triage_summary,
+            trigger_ref=trigger_ref,
         )
 
         # Return to triaged (enriched with localization data)
@@ -189,14 +222,22 @@ async def process_localization(report_id: str) -> None:
             report_update_status(report_id, "triaged")
 
         logger.info("Report %s localization complete", report_id)
+        return LocalOutcome.COMPLETED
 
     except Exception as e:
         logger.error("Localization failed for report %s: %s", report_id, e)
         async with db_write_lock:
             report_update_status(report_id, "triaged")
+        return LocalOutcome.FAILED
 
 
-async def run_local_analysis(report_id: str) -> None:
+async def run_local_analysis(
+    report_id: str,
+    *,
+    triage_llm: Optional[LLMPin] = None,
+    localize_llm: Optional[LLMPin] = None,
+    trigger_ref: Optional[str] = None,
+) -> LocalOutcome:
     """Manual Stage 2 + Stage 3 dispatch (POST /reports/{id}/analyze, tier=local).
 
     The user's intent is to get localization. Since the endpoint only admits
@@ -209,10 +250,13 @@ async def run_local_analysis(report_id: str) -> None:
 
     Deliberately does NOT consult `analysis_mode` — an explicit request
     overrides `hold`/`local_only` for this one run (§5.3).
+
+    Phase 11: the triage sync pins each stage's (provider, model) and tags
+    the rows with its action id; the result says what happened.
     """
     report = report_get(report_id)
     if not report:
-        return
+        return LocalOutcome.NOT_CLAIMED
 
     # Push a clarification-gated report on: the user asked to analyze it anyway.
     if report["status"] == "clarification_needed":
@@ -224,17 +268,29 @@ async def run_local_analysis(report_id: str) -> None:
         a.get("status") == "completed"
         for a in analyses_for_report(report_id, phase="triage")
     )
+    # Keyword arguments only when set, so worker/API calls are unchanged.
+    tag = {"trigger_ref": trigger_ref} if trigger_ref is not None else {}
+    triaged_now = False
     if not has_triage:
-        await process_triaged(report_id)
+        pin = {"llm": triage_llm} if triage_llm is not None else {}
+        triaged_now = bool(await process_triaged(report_id, **pin, **tag))
 
     # If triage (re-)routed to clarification_needed, the localization claim on
     # 'triaged' fails and this is a silent no-op — correct behavior.
-    await process_localization(report_id)
+    pin = {"llm": localize_llm} if localize_llm is not None else {}
+    outcome = await process_localization(report_id, **pin, **tag)
+    if outcome is LocalOutcome.NOT_CLAIMED and triaged_now:
+        return LocalOutcome.TRIAGE_ONLY
+    return outcome
 
 
 async def process_fix_proposal(
-    report_id: str, llm_override: Optional[LLMOverride] = None
-) -> None:
+    report_id: str,
+    llm_override: Optional[LLMOverride] = None,
+    *,
+    attribution_ref: Optional[str] = None,
+    trigger_ref: Optional[str] = None,
+) -> FixOutcome:
     """Stage 4 entry point — delegate to the fix-proposer stage.
 
     The stage owns its own atomic claim (TRIAGED -> FIX_PROPOSING) and
@@ -247,4 +303,7 @@ async def process_fix_proposal(
     manual cloud analyze call. It lives only in this in-process task's
     arguments; the queue worker never passes one.
     """
-    await propose_fix(report_id, llm_override=llm_override)
+    return await propose_fix(
+        report_id, llm_override=llm_override,
+        attribution_ref=attribution_ref, trigger_ref=trigger_ref,
+    )

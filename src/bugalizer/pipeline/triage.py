@@ -37,8 +37,13 @@ async def triage_report(
     report: dict[str, Any],
     model: str | None = None,
     provider: str | None = None,
+    *,
+    trigger_ref: str | None = None,
 ) -> dict[str, Any]:
     """Run Stage 2 triage on a report.
+
+    `trigger_ref` (Phase 11) tags the analysis row with the sonicgrid triage
+    action that started this run; worker and API runs leave it null.
 
     Calls the LLM (lock NOT held during network I/O), then writes results
     to DB under db_write_lock.
@@ -65,6 +70,7 @@ async def triage_report(
             phase="triage",
             status="running",
             started_at=now,
+            trigger_ref=trigger_ref,
         )
 
     try:

@@ -103,8 +103,11 @@ async def localize_report(
     model: str | None = None,
     provider: str | None = None,
     triage_summary: str | None = None,
+    trigger_ref: str | None = None,
 ) -> dict[str, Any]:
     """Run Stage 3 localization on a report.
+
+    `trigger_ref` (Phase 11): see `triage_report`.
 
     Two-pass approach:
     1. Send repo map + bug report -> LLM identifies candidate files
@@ -130,6 +133,7 @@ async def localize_report(
             phase="localization",
             status="running",
             started_at=now,
+            trigger_ref=trigger_ref,
         )
 
     try:

@@ -327,6 +327,10 @@ class SupabaseIngestConfig(BaseModel):
     url: str = Field(..., min_length=1, max_length=1000)
     table: str = Field(..., min_length=1, max_length=128)
     credential_env: str = Field(..., min_length=1, max_length=128)
+    # Phase 11 (B3): the env var holding sonicgrid's write-scoped triage token.
+    # Absent = triage sync off for this project. Like credential_env, a name,
+    # never the value.
+    triage_credential_env: Optional[str] = Field(None, min_length=1, max_length=128)
 
     @field_validator("url")
     @classmethod
@@ -349,15 +353,25 @@ class SupabaseIngestConfig(BaseModel):
             raise ValueError("table must be a plain SQL identifier")
         return value
 
-    @field_validator("credential_env")
+    @field_validator("credential_env", "triage_credential_env")
     @classmethod
-    def _env_var_name(cls, value: str) -> str:
-        if not _ENV_VAR_NAME.match(value):
+    def _env_var_name(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not _ENV_VAR_NAME.match(value):
             raise ValueError(
-                "credential_env must be an environment variable name "
+                "must be an environment variable name "
                 "(uppercase letters, digits, underscores)"
             )
         return value
+
+
+def triage_base_url(ingest_config: Optional[dict[str, Any]]) -> Optional[str]:
+    """Phase 11: sonicgrid's triage endpoints live under the S0 poll URL's
+    parent (`…/api/bugalizer/bug-reports` → `…/api/bugalizer`), so the base
+    is derived, never configured separately. None without a usable URL."""
+    url = (ingest_config or {}).get("url")
+    if not isinstance(url, str) or "/" not in urlsplit(url).path.rstrip("/"):
+        return None
+    return url.rstrip("/").rsplit("/", 1)[0]
 
 
 def validate_ingest_pair(
@@ -389,7 +403,9 @@ def validate_ingest_pair(
                 for err in getattr(exc, "errors", lambda: [])()
             ) or "invalid ingest_config"
             raise ValueError(f"invalid ingest_config for supabase ({reasons})") from None
-        return source_enum.value, validated.model_dump()
+        # exclude_none: a config without the optional Phase 11 key stays the
+        # exact three-key dict B1 stored.
+        return source_enum.value, validated.model_dump(exclude_none=True)
     raise ValueError("unknown ingest_source")  # pragma: no cover - enum-exhaustive
 
 
@@ -465,6 +481,33 @@ class IngestRunResponse(BaseModel):
     """POST /projects/{id}/ingest/run (Phase 10): one poll, run now."""
     imported: int
     pages: int
+    last_error: Optional[str] = None
+
+
+class TriageSyncStatusResponse(BaseModel):
+    """GET /projects/{id}/triage-sync (Phase 11). Presence flags and counts:
+    never the token, requester emails or payloads."""
+    enabled: bool
+    configured: bool
+    credential_present: bool
+    last_tick_at: Optional[str] = None
+    last_ok_at: Optional[str] = None
+    last_error: Optional[str] = None
+    consecutive_failures: int = 0
+    unresolved_actions: int = 0
+    actions: dict[str, int] = Field(default_factory=dict)
+    results_tracked: int = 0
+    results_pending: int = 0
+    result_errors: list[str] = Field(default_factory=list)  # report ids only
+    terminal_errors: int = 0
+
+
+class TriageSyncRunResponse(BaseModel):
+    """POST /projects/{id}/triage-sync/run (Phase 11): one tick, run now."""
+    actions_seen: int
+    actions_started: int
+    terminals_posted: int
+    results_pushed: int
     last_error: Optional[str] = None
 
 

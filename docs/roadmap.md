@@ -111,8 +111,8 @@ tree-sitter / uv
   - `scripts/windows/check-service.ps1`
 - **Depends on:** Phase 5b
 
-### Phase 8: open-pr (B2)
-- **Status:** Implemented, codex-approved 2026-09-18 (impl round 3), merged
+### Phase 8: open-pr
+- **Status:** Complete: B2. Codex-approved 2026-09-18 (impl round 3), merged
   2026-09-18 (PR #5, `5e7caab`). **Acceptance pending:** blocked on the
   `spherop/sonicgrid` token, which only the repo owner (Dan) can issue.
   Steps: [`docs/open-pr-acceptance.md`](open-pr-acceptance.md); BOWIE prep:
@@ -156,7 +156,7 @@ tree-sitter / uv
   - `scripts/windows/open-pr-smoke.ps1` for the BOWIE acceptance walk
 - **Depends on:** Phase 7
 
-### Phase 9: private-repo-access (proposed)
+### Phase 9: private-repo-access
 - **Status:** Proposed 2026-09-18, not queued; starts on Greg's call. Should
   land before or alongside B1, which needs a clone that stays current.
 - **Description:** `POST /projects/{id}/clone`, `git pull` in the pipeline and
@@ -198,8 +198,10 @@ tree-sitter / uv
   - Token secrecy tests matching Phases 7 and 8; reporter email never stored
 - **Depends on:** Phase 7
 
-### Phase 11: sonicgrid-triage-sync (B3, proposed)
-- **Status:** Proposed 2026-09-30, not queued. Direction:
+### Phase 11: sonicgrid-triage-sync
+- **Status:** B3, implemented 2026-10-01, impl in review (plan codex-approved round 3;
+  `docs/phases/sonicgrid-triage-sync.md`). Acceptance on BOWIE after merge:
+  `docs/sonicgrid-triage-acceptance.md`. Direction:
   `~/projects/QA/docs/bugalizer-sonicgrid-triage-direction-2026-09-30.html`
   (rulings E1 to E6, Jack; first users Jack and Dan). Pairs with
   sonicgrid's S2 `sonicgrid-triage`, whose contract document it builds against.
@@ -214,11 +216,12 @@ tree-sitter / uv
   sonicgrid users (initially Jack), everyone else on BOWIE's local models; spend
   attributed per requesting user via `key_ref`; a second, write-scoped sonicgrid token
   resolved like `SONICGRID_POLL_TOKEN`.
-- **Needs (outside this repo):** sonicgrid S2's contract document.
+- **Needs (outside this repo):** sonicgrid S2's contract document: landed as
+  `documentation/BUGALIZER-TRIAGE-ENDPOINTS.md` (sonicgrid `9ce7fe50`, PR #618), hosted acceptance 2026-09-30.
 - **Depends on:** Phase 10, Phase 8
 
-### Phase 12: per-user-cloud-keys (B4, proposed, later)
-- **Status:** Proposed 2026-09-30, not queued; after Phase 11 once someone besides Jack
+### Phase 12: per-user-cloud-keys
+- **Status:** B4, proposed 2026-09-30 (later), not queued; after Phase 11 once someone besides Jack
   needs cloud analysis. Pairs with sonicgrid's S3 `sonicgrid-ai-settings`.
 - **Description:** Nobody spends Jack's cloud accounts but Jack (E4). Each sonicgrid
   user enters their own Anthropic or Codex/OpenAI key and model on a sonicgrid AI

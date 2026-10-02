@@ -57,6 +57,60 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["reports"])
 
 
+# ---------------------------------------------------------------------------
+# Shared preconditions (Phase 11): the endpoints and the sonicgrid triage sync
+# call the same checks, so their 409 rules cannot drift. Each returns None
+# when the action may proceed, else (status_code, detail).
+# ---------------------------------------------------------------------------
+
+def check_local_analysis(row: dict) -> Optional[tuple[int, str]]:
+    """Manual local analysis: 'triaged' or 'clarification_needed' only."""
+    # Local (re-)analysis is a manual override: allow it from 'triaged' or
+    # from 'clarification_needed' (the whole point is to push a report the
+    # triage model flagged for clarification on into localization). Reject
+    # only transient claim states already owned by a pipeline stage.
+    if row["status"] not in ("triaged", "clarification_needed"):
+        return 409, (
+            f"Report is in status '{row['status']}'; manual local "
+            "analysis requires 'triaged' or 'clarification_needed'"
+        )
+    return None
+
+
+def check_cloud_analysis(row: dict, project: Optional[dict]) -> Optional[tuple[int, str]]:
+    """Cloud tier: 'triaged' plus a completed, SHA-fresh localization."""
+    if row["status"] != "triaged":
+        return 409, (
+            f"Report is in status '{row['status']}'; cloud analysis "
+            "requires 'triaged' (run local analysis first)"
+        )
+    # Enforce the same completed + SHA-fresh localization preconditions as
+    # reports_eligible_for_fix, but as a 409 the caller can act on.
+    # (propose_fix re-checks defensively after its claim.)
+    loc = latest_completed_localization(row["id"])
+    if not loc:
+        return 409, "No completed localization; run local analysis first"
+    head_sha = project.get("head_sha") if project else None
+    result = loc.get("result")
+    loc_sha = result.get("repo_sha") if isinstance(result, dict) else None
+    if not head_sha or loc_sha != head_sha:
+        return 409, (
+            f"Localization is stale (repo_sha={loc_sha!r} != project "
+            f"head_sha={head_sha!r}); re-run local analysis first"
+        )
+    return None
+
+
+def check_status_transition(row: dict, target: BugStatus) -> Optional[tuple[int, str]]:
+    """The status PATCH's transition rules."""
+    current = BugStatus(row["status"])
+    if current in TERMINAL_STATUSES:
+        return 409, f"Cannot transition from terminal status '{current.value}'"
+    if not validate_transition(current, target, enforce_phase_gating=True):
+        return 409, f"Invalid transition: '{current.value}' → '{target.value}'"
+    return None
+
+
 def _build_warnings(body: BugReportCreate) -> list[str]:
     """Return warnings for missing recommended fields."""
     warnings: list[str] = []
@@ -215,17 +269,9 @@ def update_report_status(
     current = BugStatus(row["status"])
     target = body.status
 
-    if current in TERMINAL_STATUSES:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Cannot transition from terminal status '{current.value}'",
-        )
-
-    if not validate_transition(current, target, enforce_phase_gating=True):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Invalid transition: '{current.value}' → '{target.value}'",
-        )
+    refusal = check_status_transition(row, target)
+    if refusal is not None:
+        raise HTTPException(status_code=refusal[0], detail=refusal[1])
 
     if target in TERMINAL_STATUSES and not body.resolution_reason:
         # For terminal states, resolution_reason is recommended but not required.
@@ -319,50 +365,16 @@ async def analyze_report(
 
     llm_source: Optional[str] = None
     if body.tier == AnalysisTier.LOCAL:
-        # Local (re-)analysis is a manual override: allow it from 'triaged' or
-        # from 'clarification_needed' (the whole point is to push a report the
-        # triage model flagged for clarification on into localization). Reject
-        # only transient claim states already owned by a pipeline stage.
-        if row["status"] not in ("triaged", "clarification_needed"):
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Report is in status '{row['status']}'; manual local "
-                    "analysis requires 'triaged' or 'clarification_needed'"
-                ),
-            )
+        refusal = check_local_analysis(row)
+        if refusal is not None:
+            raise HTTPException(status_code=refusal[0], detail=refusal[1])
         background_tasks.add_task(run_local_analysis, report_id)
         detail = "Local triage + localization dispatched"
     else:
-        if row["status"] != "triaged":
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Report is in status '{row['status']}'; cloud analysis "
-                    "requires 'triaged' (run local analysis first)"
-                ),
-            )
-        # Cloud tier: enforce the same completed + SHA-fresh localization
-        # preconditions as reports_eligible_for_fix, but as a 409 the caller
-        # can act on. (propose_fix re-checks defensively after its claim.)
-        loc = latest_completed_localization(report_id)
-        if not loc:
-            raise HTTPException(
-                status_code=409,
-                detail="No completed localization; run local analysis first",
-            )
         project = project_get(row["project_id"])
-        head_sha = project.get("head_sha") if project else None
-        result = loc.get("result")
-        loc_sha = result.get("repo_sha") if isinstance(result, dict) else None
-        if not head_sha or loc_sha != head_sha:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Localization is stale (repo_sha={loc_sha!r} != project "
-                    f"head_sha={head_sha!r}); re-run local analysis first"
-                ),
-            )
+        refusal = check_cloud_analysis(row, project)
+        if refusal is not None:
+            raise HTTPException(status_code=refusal[0], detail=refusal[1])
         if override is not None and (
             override.provider or override.model or override.has_key()
         ):
