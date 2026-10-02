@@ -199,6 +199,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
         conn.commit()
         logger.info("Migration: added projects.ingest_generation column")
+    # Phase 11 (sonicgrid-triage-sync): the triage action that started a
+    # stage row, so recovery evidence is exact. Null for worker/API runs.
+    an_columns = {row[1] for row in conn.execute("PRAGMA table_info(analyses)").fetchall()}
+    if an_columns and "trigger_ref" not in an_columns:
+        conn.execute("ALTER TABLE analyses ADD COLUMN trigger_ref TEXT")
+        conn.commit()
+        logger.info("Migration: added analyses.trigger_ref column")
+    fp_columns = {row[1] for row in conn.execute("PRAGMA table_info(fix_proposals)").fetchall()}
+    if fp_columns and "trigger_ref" not in fp_columns:
+        conn.execute("ALTER TABLE fix_proposals ADD COLUMN trigger_ref TEXT")
+        conn.commit()
+        logger.info("Migration: added fix_proposals.trigger_ref column")
+
     br_columns = {row[1] for row in conn.execute("PRAGMA table_info(bug_reports)").fetchall()}
     if {"project_id", "external_id"} <= br_columns:
         # The idempotency key for imports (ingest_commit's ON CONFLICT target).
@@ -302,6 +315,7 @@ CREATE TABLE IF NOT EXISTS analyses (
     estimated_cost_usd REAL DEFAULT 0.0,
     started_at TEXT,
     completed_at TEXT,
+    trigger_ref TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -324,6 +338,7 @@ CREATE TABLE IF NOT EXISTS fix_proposals (
     pr_number INTEGER,
     pushed_sha TEXT,
     pr_opened_at TEXT,
+    trigger_ref TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -360,6 +375,61 @@ CREATE TABLE IF NOT EXISTS ingest_state (
     last_error TEXT,
     consecutive_failures INTEGER NOT NULL DEFAULT 0,
     imported_total INTEGER NOT NULL DEFAULT 0
+);
+
+-- Phase 11 (sonicgrid-triage-sync): one row per pushed report. `fingerprint`,
+-- `revision` and `payload` are written together before each PUT, so a retry
+-- resends the same revision with the same payload.
+CREATE TABLE IF NOT EXISTS triage_results (
+    report_id TEXT PRIMARY KEY REFERENCES bug_reports(id),
+    project_id TEXT NOT NULL,
+    fingerprint TEXT,
+    revision INTEGER NOT NULL DEFAULT 0,
+    payload TEXT,
+    acked_fingerprint TEXT,
+    failed_fingerprint TEXT,
+    last_status INTEGER,
+    last_error TEXT,
+    pushed_at TEXT
+);
+
+-- Phase 11: the action ledger, keyed by sonicgrid action id. `outcome`,
+-- `message` and `steps` are written once (conditional on phase != finished).
+CREATE TABLE IF NOT EXISTS triage_actions (
+    action_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    report_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    params TEXT,
+    requested_by_user_id TEXT,
+    phase TEXT NOT NULL,
+    no_auto_retry INTEGER NOT NULL DEFAULT 0,
+    pinned_llm TEXT,
+    reserved_at TEXT NOT NULL,
+    intent_at TEXT,
+    dispatched_at TEXT,
+    finished_at TEXT,
+    outcome TEXT,
+    message TEXT,
+    steps TEXT,
+    fix_proposal_id TEXT,
+    pr_url TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    terminal_acked INTEGER NOT NULL DEFAULT 0,
+    terminal_error TEXT,
+    late_outcome TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_triage_actions_project ON triage_actions(project_id, phase);
+
+-- Phase 11: per-project tick bookkeeping (fixed error codes only).
+CREATE TABLE IF NOT EXISTS triage_sync_state (
+    project_id TEXT PRIMARY KEY,
+    last_tick_at TEXT,
+    last_ok_at TEXT,
+    last_error TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    unresolved_actions INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -432,8 +502,10 @@ def project_update(project_id: str, **fields: Any) -> Optional[dict[str, Any]]:
     if "ingest_source" in fields or "ingest_config" in fields:
         new_source = fields.get("ingest_source", existing.get("ingest_source"))
         new_config = fields.get("ingest_config", existing.get("ingest_config"))
-        ingest_changed = (new_source, new_config) != (
-            existing.get("ingest_source"), existing.get("ingest_config")
+        # Phase 11: `triage_credential_env` configures the triage sync, not
+        # the poll, so toggling it must not reset B1's checkpoint.
+        ingest_changed = (new_source, _poll_identity(new_config)) != (
+            existing.get("ingest_source"), _poll_identity(existing.get("ingest_config"))
         )
     if isinstance(fields.get("ingest_config"), dict):
         fields["ingest_config"] = json.dumps(fields["ingest_config"])
@@ -447,6 +519,12 @@ def project_update(project_id: str, **fields: Any) -> Optional[dict[str, Any]]:
         conn.execute("DELETE FROM ingest_state WHERE project_id = ?", (project_id,))
     conn.commit()
     return project_get(project_id)
+
+
+def _poll_identity(config: Any) -> Any:
+    if isinstance(config, dict):
+        return {k: v for k, v in config.items() if k != "triage_credential_env"}
+    return config
 
 
 def project_has_active_reports(project_id: str) -> bool:
@@ -467,6 +545,8 @@ def project_delete(project_id: str) -> bool | str:
         return False
     if project_has_active_reports(project_id):
         return "has_reports"
+    # Phase 11: result rows reference reports, so they go first.
+    conn.execute("DELETE FROM triage_results WHERE project_id = ?", (project_id,))
     # Clean up soft-deleted reports before removing the project (FK constraint).
     conn.execute(
         "DELETE FROM bug_reports WHERE project_id = ? AND resolution_reason = 'deleted'",
@@ -474,6 +554,9 @@ def project_delete(project_id: str) -> bool | str:
     )
     # Phase 10: the FK cascades too, but deletion must not depend on the pragma.
     conn.execute("DELETE FROM ingest_state WHERE project_id = ?", (project_id,))
+    # Phase 11: the rest of the triage ledger.
+    for table in ("triage_actions", "triage_sync_state"):
+        conn.execute(f"DELETE FROM {table} WHERE project_id = ?", (project_id,))
     conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
     conn.commit()
     return True
@@ -790,6 +873,7 @@ def analysis_create(
     estimated_cost_usd: float = 0.0,
     started_at: Optional[str] = None,
     completed_at: Optional[str] = None,
+    trigger_ref: Optional[str] = None,
 ) -> dict[str, Any]:
     conn = _get_conn()
     row_id = _new_id()
@@ -798,13 +882,13 @@ def analysis_create(
         """INSERT INTO analyses
            (id, bug_report_id, phase, status, result,
             llm_provider, llm_model, prompt_tokens, completion_tokens,
-            estimated_cost_usd, started_at, completed_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            estimated_cost_usd, started_at, completed_at, trigger_ref, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             row_id, bug_report_id, phase, status,
             json.dumps(result) if result else None,
             llm_provider, llm_model, prompt_tokens, completion_tokens,
-            estimated_cost_usd, started_at, completed_at, now,
+            estimated_cost_usd, started_at, completed_at, trigger_ref, now,
         ),
     )
     conn.commit()
@@ -1082,6 +1166,7 @@ def fix_proposal_create(
     diff: str,
     confidence: float,
     files_changed: list[str],
+    trigger_ref: Optional[str] = None,
 ) -> dict[str, Any]:
     """Insert a new fix_proposals row and return the created record."""
     conn = _get_conn()
@@ -1090,10 +1175,11 @@ def fix_proposal_create(
     conn.execute(
         """INSERT INTO fix_proposals
            (id, bug_report_id, analysis_id, branch_name, diff, explanation,
-            confidence, root_cause, files_changed, status, created_at, updated_at)
-           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, 'proposed', ?, ?)""",
+            confidence, root_cause, files_changed, status, trigger_ref,
+            created_at, updated_at)
+           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?)""",
         (row_id, bug_report_id, analysis_id, diff, explanation,
-         confidence, root_cause, json.dumps(files_changed), now, now),
+         confidence, root_cause, json.dumps(files_changed), trigger_ref, now, now),
     )
     conn.commit()
     row = conn.execute(
@@ -1694,3 +1780,328 @@ def ingest_commit(
     except BaseException:
         conn.rollback()
         raise
+
+
+# ---------------------------------------------------------------------------
+# Triage sync (Phase 11 / B3 sonicgrid-triage-sync)
+# ---------------------------------------------------------------------------
+
+def projects_with_triage_sync() -> list[dict[str, Any]]:
+    """Projects whose ingest config names a triage credential, oldest first."""
+    return [
+        p for p in projects_with_ingest()
+        if isinstance(p.get("ingest_config"), dict)
+        and p["ingest_config"].get("triage_credential_env")
+    ]
+
+
+def sync_reports(project_id: str) -> list[dict[str, Any]]:
+    """Sonicgrid-sourced reports of a project (those with an external id)."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM bug_reports WHERE project_id = ? AND external_id IS NOT NULL "
+        "ORDER BY created_at",
+        (project_id,),
+    ).fetchall()
+    return [_report_row_to_dict(r) for r in rows]
+
+
+def report_by_external_id(project_id: str, external_id: str) -> Optional[dict[str, Any]]:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM bug_reports WHERE project_id = ? AND external_id = ?",
+        (project_id, external_id),
+    ).fetchone()
+    return _report_row_to_dict(row) if row else None
+
+
+def triage_result_get(report_id: str) -> Optional[dict[str, Any]]:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM triage_results WHERE report_id = ?", (report_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+@retry_on_locked
+def triage_result_stage(
+    report_id: str, project_id: str, fingerprint: str, revision: int, payload: str
+) -> None:
+    """Record the fingerprint, revision and payload of the next push, together,
+    before the PUT (one revision always means one payload)."""
+    conn = _get_conn()
+    conn.execute(
+        """INSERT INTO triage_results (report_id, project_id, fingerprint, revision, payload)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(report_id) DO UPDATE SET
+             fingerprint = excluded.fingerprint, revision = excluded.revision,
+             payload = excluded.payload, failed_fingerprint = NULL,
+             last_error = NULL""",
+        (report_id, project_id, fingerprint, revision, payload),
+    )
+    conn.commit()
+
+
+_TRIAGE_RESULT_FIELDS = frozenset({
+    "revision", "acked_fingerprint", "failed_fingerprint",
+    "last_status", "last_error", "pushed_at",
+})
+
+
+@retry_on_locked
+def triage_result_update(report_id: str, **fields: Any) -> None:
+    unknown = set(fields) - _TRIAGE_RESULT_FIELDS
+    if unknown:
+        raise ValueError(f"unknown triage_results fields: {sorted(unknown)}")
+    conn = _get_conn()
+    conn.execute(
+        f"UPDATE triage_results SET {', '.join(f'{k} = ?' for k in fields)} WHERE report_id = ?",
+        [*fields.values(), report_id],
+    )
+    conn.commit()
+
+
+def _triage_action_row(row: Any) -> dict[str, Any]:
+    d = dict(row)
+    for key in ("params", "pinned_llm", "steps"):
+        if isinstance(d.get(key), str):
+            try:
+                d[key] = json.loads(d[key])
+            except json.JSONDecodeError:
+                d[key] = None
+    return d
+
+
+def triage_action_get(action_id: str) -> Optional[dict[str, Any]]:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM triage_actions WHERE action_id = ?", (action_id,)
+    ).fetchone()
+    return _triage_action_row(row) if row else None
+
+
+@retry_on_locked
+def triage_action_reserve(
+    action_id: str,
+    project_id: str,
+    report_id: str,
+    kind: str,
+    params: dict[str, Any],
+    requested_by_user_id: Optional[str],
+) -> bool:
+    """Create the ledger row (`phase='reserved'`). True only for the caller
+    that inserted it; an existing row means the action is not new."""
+    conn = _get_conn()
+    cur = conn.execute(
+        """INSERT INTO triage_actions
+           (action_id, project_id, report_id, kind, params, requested_by_user_id,
+            phase, reserved_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?)
+           ON CONFLICT(action_id) DO NOTHING""",
+        (action_id, project_id, report_id, kind, json.dumps(params),
+         requested_by_user_id, _now()),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+@retry_on_locked
+def triage_action_delete_reserved(action_id: str) -> None:
+    """Drop a reservation whose claim sonicgrid refused (nothing ran)."""
+    conn = _get_conn()
+    conn.execute(
+        "DELETE FROM triage_actions WHERE action_id = ? AND phase = 'reserved'", (action_id,)
+    )
+    conn.commit()
+
+
+_TRIAGE_ACTION_FIELDS = frozenset({
+    "phase", "no_auto_retry", "pinned_llm", "intent_at", "dispatched_at",
+    "fix_proposal_id", "pr_url", "attempts", "steps", "terminal_acked",
+    "terminal_error", "late_outcome",
+})
+
+
+@retry_on_locked
+def triage_action_update(
+    action_id: str, *, expected_phase: Optional[str] = None, **fields: Any
+) -> bool:
+    """Update ledger fields; with `expected_phase`, only if the row is still in
+    it. Never touches a finished row's outcome (see triage_action_finish)."""
+    unknown = set(fields) - _TRIAGE_ACTION_FIELDS
+    if unknown:
+        raise ValueError(f"unknown triage_actions fields: {sorted(unknown)}")
+    for key in ("pinned_llm", "steps"):
+        if key in fields and not isinstance(fields[key], (str, type(None))):
+            fields[key] = json.dumps(fields[key])
+    conn = _get_conn()
+    where = "action_id = ?"
+    params: list[Any] = [*fields.values(), action_id]
+    if expected_phase is not None:
+        where += " AND phase = ?"
+        params.append(expected_phase)
+    cur = conn.execute(
+        f"UPDATE triage_actions SET {', '.join(f'{k} = ?' for k in fields)} WHERE {where}",
+        params,
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+@retry_on_locked
+def triage_action_finish(
+    action_id: str,
+    outcome: str,
+    message: Optional[str],
+    steps: Optional[list[dict[str, Any]]] = None,
+    *,
+    expected_phase: Optional[str] = None,
+) -> bool:
+    """Write the terminal outcome once. False (and nothing written) when the
+    row is already finished, or not in `expected_phase`."""
+    conn = _get_conn()
+    where = "action_id = ? AND phase != 'finished'"
+    params: list[Any] = [outcome, message, json.dumps(steps) if steps is not None else None,
+                         _now(), action_id]
+    if expected_phase is not None:
+        where += " AND phase = ?"
+        params.append(expected_phase)
+    cur = conn.execute(
+        f"""UPDATE triage_actions
+            SET phase = 'finished', outcome = ?, message = ?, steps = ?, finished_at = ?
+            WHERE {where}""",
+        params,
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def triage_actions_unacked(project_id: str) -> list[dict[str, Any]]:
+    """Finished actions whose terminal POST is not yet acknowledged."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM triage_actions WHERE project_id = ? AND phase = 'finished' "
+        "AND terminal_acked = 0 ORDER BY finished_at",
+        (project_id,),
+    ).fetchall()
+    return [_triage_action_row(r) for r in rows]
+
+
+def triage_action_counts(project_id: str) -> dict[str, int]:
+    conn = _get_conn()
+    counts = {
+        r["phase"]: r["n"]
+        for r in conn.execute(
+            "SELECT phase, COUNT(*) AS n FROM triage_actions WHERE project_id = ? "
+            "AND NOT (phase = 'finished' AND terminal_acked = 1) GROUP BY phase",
+            (project_id,),
+        ).fetchall()
+    }
+    counts["acked"] = conn.execute(
+        "SELECT COUNT(*) FROM triage_actions WHERE project_id = ? AND phase = 'finished' "
+        "AND terminal_acked = 1",
+        (project_id,),
+    ).fetchone()[0]
+    return counts
+
+
+def triage_terminal_error_count(project_id: str) -> int:
+    conn = _get_conn()
+    return conn.execute(
+        "SELECT COUNT(*) FROM triage_actions WHERE project_id = ? AND terminal_error IS NOT NULL",
+        (project_id,),
+    ).fetchone()[0]
+
+
+def analyses_by_trigger(trigger_ref: str) -> list[dict[str, Any]]:
+    """Stage rows a triage action started, newest first."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM analyses WHERE trigger_ref = ? ORDER BY created_at DESC",
+        (trigger_ref,),
+    ).fetchall()
+    return [_analysis_row_to_dict(r) for r in rows]
+
+
+def fix_proposals_by_trigger(trigger_ref: str) -> list[dict[str, Any]]:
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM fix_proposals WHERE trigger_ref = ? ORDER BY created_at DESC",
+        (trigger_ref,),
+    ).fetchall()
+    return [_fix_proposal_row_to_dict(r) for r in rows]
+
+
+def triage_results_summary(project_id: str) -> dict[str, Any]:
+    conn = _get_conn()
+    tracked = conn.execute(
+        "SELECT COUNT(*) FROM triage_results WHERE project_id = ?", (project_id,)
+    ).fetchone()[0]
+    pending = conn.execute(
+        "SELECT COUNT(*) FROM triage_results WHERE project_id = ? "
+        "AND fingerprint IS NOT acked_fingerprint AND fingerprint IS NOT failed_fingerprint",
+        (project_id,),
+    ).fetchone()[0]
+    errors = [
+        r["report_id"] for r in conn.execute(
+            "SELECT report_id FROM triage_results WHERE project_id = ? "
+            "AND last_error IS NOT NULL ORDER BY report_id",
+            (project_id,),
+        ).fetchall()
+    ]
+    return {"tracked": tracked, "pending": pending, "errors": errors}
+
+
+def triage_sync_state_get(project_id: str) -> Optional[dict[str, Any]]:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM triage_sync_state WHERE project_id = ?", (project_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+@retry_on_locked
+def triage_sync_state_record(
+    project_id: str, *, error: Optional[str], unresolved_actions: int
+) -> int:
+    """Record one tick's outcome; returns consecutive failures after it."""
+    conn = _get_conn()
+    now = _now()
+    conn.execute(
+        """INSERT INTO triage_sync_state (project_id) VALUES (?)
+           ON CONFLICT(project_id) DO NOTHING""",
+        (project_id,),
+    )
+    if error is None:
+        conn.execute(
+            """UPDATE triage_sync_state SET last_tick_at = ?, last_ok_at = ?, last_error = NULL,
+               consecutive_failures = 0, unresolved_actions = ? WHERE project_id = ?""",
+            (now, now, unresolved_actions, project_id),
+        )
+    else:
+        conn.execute(
+            """UPDATE triage_sync_state SET last_tick_at = ?, last_error = ?,
+               consecutive_failures = consecutive_failures + 1, unresolved_actions = ?
+               WHERE project_id = ?""",
+            (now, error, unresolved_actions, project_id),
+        )
+    conn.commit()
+    return int(conn.execute(
+        "SELECT consecutive_failures FROM triage_sync_state WHERE project_id = ?", (project_id,)
+    ).fetchone()[0])
+
+
+def triage_sync_health_counts() -> dict[str, int]:
+    """Aggregate, non-identifying triage-sync counts for the public /health."""
+    projects = projects_with_triage_sync()
+    ids = [p["id"] for p in projects]
+    failing = 0
+    if ids:
+        conn = _get_conn()
+        placeholders = ",".join("?" for _ in ids)
+        failing = conn.execute(
+            f"SELECT COUNT(*) FROM triage_sync_state WHERE project_id IN ({placeholders}) "
+            "AND last_error IS NOT NULL",
+            ids,
+        ).fetchone()[0]
+    return {"projects": len(ids), "failing": failing}

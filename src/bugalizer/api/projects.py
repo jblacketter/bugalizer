@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -15,6 +16,11 @@ from bugalizer.db import (
     project_get,
     project_list,
     project_update,
+    projects_with_triage_sync,
+    triage_action_counts,
+    triage_results_summary,
+    triage_sync_state_get,
+    triage_terminal_error_count,
 )
 from bugalizer.models import (
     IngestRunResponse,
@@ -24,6 +30,9 @@ from bugalizer.models import (
     ProjectResponse,
     ProjectUpdate,
     RepoMapResponse,
+    TriageSyncRunResponse,
+    TriageSyncStatusResponse,
+    triage_base_url,
     validate_ingest_pair,
 )
 
@@ -57,6 +66,17 @@ def _checked_ingest_pair(source, config):
         raise HTTPException(status_code=422, detail=str(exc)) from None
 
 
+def _check_triage_source(project_id: Optional[str], config: Optional[dict]) -> None:
+    """Phase 11: one sync consumer per sonicgrid. `GET /actions` lists every
+    bug's actions, so two projects syncing the same source would both act."""
+    if not isinstance(config, dict) or not config.get("triage_credential_env"):
+        return
+    base = triage_base_url(config)
+    for other in projects_with_triage_sync():
+        if other["id"] != project_id and triage_base_url(other.get("ingest_config")) == base:
+            raise HTTPException(status_code=409, detail="triage_source_in_use")
+
+
 @router.post("/projects", status_code=201)
 def create_project(
     body: ProjectCreate,
@@ -66,6 +86,7 @@ def create_project(
     ingest_source, ingest_config = _checked_ingest_pair(
         body.ingest_source, body.ingest_config
     )
+    _check_triage_source(None, ingest_config)
     row = project_create(
         name=body.name,
         repo_url=body.repo_url,
@@ -141,6 +162,7 @@ def update_project(
             merged_source = updates.get("ingest_source", existing.get("ingest_source"))
             merged_config = updates.get("ingest_config", existing.get("ingest_config"))
         source, config = _checked_ingest_pair(merged_source, merged_config)
+        _check_triage_source(project_id, config)
         updates["ingest_source"] = source
         updates["ingest_config"] = config
 
@@ -320,4 +342,69 @@ async def run_ingest(
     outcome = await poll_project(project_id, full=full)
     return IngestRunResponse(
         imported=outcome.imported, pages=outcome.pages, last_error=outcome.error
+    )
+
+
+# ---------------------------------------------------------------------------
+# Triage sync (Phase 11 / B3)
+# ---------------------------------------------------------------------------
+
+def _triage_env(project: Optional[dict]) -> Optional[str]:
+    config = (project or {}).get("ingest_config")
+    if not (project or {}).get("ingest_source") or not isinstance(config, dict):
+        return None
+    return config.get("triage_credential_env")
+
+
+@router.get("/projects/{project_id}/triage-sync")
+def get_triage_sync_status(
+    project_id: str,
+    _key: str = Depends(require_api_key),
+) -> TriageSyncStatusResponse:
+    """Triage-sync health for one project. Presence flags and counts only:
+    never the token, requester emails or payloads."""
+    project = project_get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    env_name = _triage_env(project)
+    state = triage_sync_state_get(project_id) or {}
+    results = triage_results_summary(project_id)
+    return TriageSyncStatusResponse(
+        enabled=settings.triage_sync_enabled,
+        configured=env_name is not None,
+        credential_present=bool(env_name) and resolve_env_credential(env_name) is not None,
+        last_tick_at=state.get("last_tick_at"),
+        last_ok_at=state.get("last_ok_at"),
+        last_error=state.get("last_error"),
+        consecutive_failures=state.get("consecutive_failures") or 0,
+        unresolved_actions=state.get("unresolved_actions") or 0,
+        actions=triage_action_counts(project_id),
+        results_tracked=results["tracked"],
+        results_pending=results["pending"],
+        result_errors=results["errors"],
+        terminal_errors=triage_terminal_error_count(project_id),
+    )
+
+
+@router.post("/projects/{project_id}/triage-sync/run")
+async def run_triage_sync(
+    project_id: str,
+    _key: str = Depends(require_api_key),
+) -> TriageSyncRunResponse:
+    """One triage-sync tick now (works with the background loop disabled).
+    409 `tick_in_progress` when this project's tick is already running."""
+    from bugalizer.sync.triage_sync import TickInProgress, sync_project
+
+    if _triage_env(project_get(project_id)) is None:
+        raise HTTPException(status_code=404, detail="Project has no triage sync configured")
+    try:
+        outcome = await sync_project(project_id, manual=True)
+    except TickInProgress:
+        raise HTTPException(status_code=409, detail="tick_in_progress") from None
+    return TriageSyncRunResponse(
+        actions_seen=outcome.actions_seen,
+        actions_started=outcome.actions_started,
+        terminals_posted=outcome.terminals_posted,
+        results_pushed=outcome.results_pushed,
+        last_error=outcome.error,
     )

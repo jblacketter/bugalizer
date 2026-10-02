@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 
@@ -72,6 +73,22 @@ class FixProposalError(Exception):
     def __init__(self, message: str, *, permanent: bool = True) -> None:
         super().__init__(message)
         self.permanent = permanent
+
+
+@dataclass(frozen=True)
+class FixOutcome:
+    """What one `propose_fix` call did (Phase 11, D-E).
+
+    `kind` is `proposed` (a proposal was written; `proposal_id` is it),
+    `failed` (a real attempt failed and was recorded), `deferred` (a
+    precondition miss; nothing spent), `not_claimed` (another run held the
+    report; nothing ran) or `already_proposed` (the latest localization
+    already has a proposal; nothing ran, `proposal_id` is the existing one).
+    `error` is sanitized text. Worker and API callers ignore it.
+    """
+    kind: str
+    proposal_id: Optional[str] = None
+    error: Optional[str] = None
 
 
 class FixProposalDefer(Exception):
@@ -267,8 +284,12 @@ def _collect_candidate_files(analysis: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 async def propose_fix(
-    report_id: str, llm_override: Optional[LLMOverride] = None
-) -> None:
+    report_id: str,
+    llm_override: Optional[LLMOverride] = None,
+    *,
+    attribution_ref: Optional[str] = None,
+    trigger_ref: Optional[str] = None,
+) -> FixOutcome:
     """Run the fix-proposal stage for a report.
 
     Atomically claims `triaged → fix_proposing`. On success transitions to
@@ -283,6 +304,11 @@ async def propose_fix(
     exactly once here, handed to `complete()`, and otherwise exists only in
     this frame. Error text on every failure path goes through
     `_safe_error_text` so the key never reaches a log line or a table.
+
+    Phase 11: `attribution_ref` is the requester reference recorded as
+    `key_ref` when the call runs on the env key (`key_source=env`); a request
+    key keeps its own `key_ref`. `trigger_ref` tags the analysis and proposal
+    rows with the triage action that started this run. Returns a FixOutcome.
     """
     # Secrets to scrub from any error text (empty when no request key).
     secrets: list[str] = []
@@ -296,13 +322,13 @@ async def propose_fix(
         claimed = try_claim_report(report_id, "triaged", "fix_proposing")
     if not claimed:
         logger.debug("Report %s already claimed for fix proposal", report_id)
-        return
+        return FixOutcome("not_claimed")
 
     try:
         report = report_get(report_id)
         if not report:
             logger.warning("Report %s not found after fix-claim", report_id)
-            return
+            return FixOutcome("not_claimed")
 
         # Double-check idempotency: if a proposal exists for the latest
         # localization analysis already, skip.
@@ -311,14 +337,15 @@ async def propose_fix(
             raise FixProposalDefer("No completed localization analysis to work from")
 
         existing = fix_proposals_for_report(report_id)
-        if any(p.get("analysis_id") == analysis["id"] for p in existing):
+        prior = next((p for p in existing if p.get("analysis_id") == analysis["id"]), None)
+        if prior is not None:
             logger.info(
                 "Report %s already has a fix proposal for analysis %s; skipping",
                 report_id, analysis["id"],
             )
             async with db_write_lock:
                 report_update_status(report_id, "fix_proposed")
-            return
+            return FixOutcome("already_proposed", proposal_id=prior["id"])
 
         project = project_get(report["project_id"])
         if not project or not project.get("repo_path"):
@@ -405,8 +432,9 @@ async def propose_fix(
                 llm_model=llm_response.model,
                 prompt_tokens=llm_response.prompt_tokens,
                 completion_tokens=llm_response.completion_tokens,
+                trigger_ref=trigger_ref,
             )
-            fix_proposal_create(
+            proposal = fix_proposal_create(
                 bug_report_id=report_id,
                 analysis_id=analysis["id"],
                 root_cause=validated["root_cause"],
@@ -414,6 +442,7 @@ async def propose_fix(
                 diff=validated["diff"],
                 confidence=validated["confidence"],
                 files_changed=validated["files_changed"],
+                trigger_ref=trigger_ref,
             )
             token_usage_create(
                 project_id=report["project_id"],
@@ -423,7 +452,10 @@ async def propose_fix(
                 prompt_tokens=llm_response.prompt_tokens,
                 completion_tokens=llm_response.completion_tokens,
                 key_source="request" if request_key else "env",
-                key_ref=(llm_override.key_ref if (llm_override and request_key) else None),
+                key_ref=(
+                    (llm_override.key_ref if llm_override else None)
+                    if request_key else attribution_ref
+                ),
             )
             report_update_status(report_id, "fix_proposed")
 
@@ -431,6 +463,7 @@ async def propose_fix(
             "Report %s fix proposal created (confidence=%.2f, files=%d)",
             report_id, validated["confidence"], len(validated["files_changed"]),
         )
+        return FixOutcome("proposed", proposal_id=proposal["id"])
 
     except FixProposalDefer as exc:
         # Precondition not met — not a fix attempt. Return to triaged WITHOUT
@@ -441,6 +474,7 @@ async def propose_fix(
         )
         async with db_write_lock:
             try_claim_report(report_id, "fix_proposing", "triaged")
+        return FixOutcome("deferred", error=_safe_error_text(exc, secrets))
 
     except Exception as exc:
         # A real fix attempt failed. Record a failed `fix` analysis row so the
@@ -464,5 +498,7 @@ async def propose_fix(
                 status="failed",
                 result={"error": error_text, "permanent": permanent},
                 completed_at=datetime.now(timezone.utc).isoformat(),
+                trigger_ref=trigger_ref,
             )
             try_claim_report(report_id, "fix_proposing", "triaged")
+        return FixOutcome("failed", error=error_text)

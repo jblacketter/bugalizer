@@ -20,12 +20,13 @@ from fastapi.staticfiles import StaticFiles
 
 from bugalizer import __version__
 from bugalizer.config import settings, unknown_env_file_settings
-from bugalizer.db import ingest_health_counts, init_db
+from bugalizer.db import ingest_health_counts, init_db, triage_sync_health_counts
 from bugalizer.api.reports import router as reports_router
 from bugalizer.api.projects import router as projects_router
 from bugalizer.api.queue import router as queue_router
 from bugalizer.api.usage import router as usage_router
 from bugalizer.ingest.poller import start_ingest, stop_ingest
+from bugalizer.sync.triage_sync import start_triage_sync, stop_triage_sync
 from bugalizer.queue.worker import start_worker, stop_worker, worker_alive
 
 logger = logging.getLogger(__name__)
@@ -92,8 +93,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         start_worker()
     if settings.ingest_enabled:
         start_ingest()
+    if settings.triage_sync_enabled:
+        start_triage_sync()
     logger.info("Bugalizer started (v%s)", __version__)
     yield
+    await stop_triage_sync()
     await stop_ingest()
     await stop_worker()
     logger.info("Bugalizer stopped")
@@ -130,6 +134,16 @@ async def _ingest_counts(db_ok: bool) -> dict[str, Optional[int]]:
     if db_ok:
         try:
             return await asyncio.to_thread(ingest_health_counts)
+        except Exception:  # pragma: no cover - defensive
+            pass
+    return {"projects": None, "failing": None}
+
+
+async def _triage_counts(db_ok: bool) -> dict[str, Optional[int]]:
+    """Phase 11: triage-sync counts for /health, nulls when the DB is down."""
+    if db_ok:
+        try:
+            return await asyncio.to_thread(triage_sync_health_counts)
         except Exception:  # pragma: no cover - defensive
             pass
     return {"projects": None, "failing": None}
@@ -231,6 +245,11 @@ def create_app() -> FastAPI:
             # project ids, error codes or cursors. Details are behind the API
             # key at GET /projects/{id}/ingest. Never changes `status`.
             "ingest": {"enabled": settings.ingest_enabled, **await _ingest_counts(db_ok)},
+            # Phase 11: the same shape for the sonicgrid triage sync; details
+            # at GET /projects/{id}/triage-sync. Never changes `status`.
+            "triage_sync": {
+                "enabled": settings.triage_sync_enabled, **await _triage_counts(db_ok)
+            },
             "checks": {
                 "database": db_ok,
                 "ollama": ollama_ok,
