@@ -286,6 +286,29 @@ def _timeout_result(row: dict[str, Any]) -> ex.Result:
     return ex.Result("failed", message)
 
 
+def _expire_if_overdue(action_id: str) -> bool:
+    """Finish the action `failed` ("timed out") if its bound has passed.
+    True when the action is finished, by this call or before it. Local only:
+    it never depends on sonicgrid answering; the drain posts it later."""
+    row = db.triage_action_get(action_id)
+    if row is None or row["phase"] == "finished":
+        return True
+    if _timed_out(row):
+        _finish(action_id, _timeout_result(row))
+        return True
+    return False
+
+
+def expire_overdue(project_id: Optional[str] = None) -> int:
+    """Apply the time bound to every open ledger row, whatever the state of
+    the action listing (an outage or backoff must not stretch the bound)."""
+    expired = 0
+    for row in db.triage_actions_open(project_id):
+        if _timed_out(row) and _finish(row["action_id"], _timeout_result(row)):
+            expired += 1
+    return expired
+
+
 # ---------------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------------
@@ -300,8 +323,16 @@ async def _run_pr(action_id: str) -> None:
     expected = "fix_done" if compound else "dispatched"
     if row["phase"] != expected:
         return  # finished (e.g. by the time bound): never start the PR step
+    if _expire_if_overdue(action_id):
+        return  # the bound passed: no further side effect
     step = await ex.pr_step(row["report_id"], row.get("fix_proposal_id") if compound else None,
                             int(row.get("attempts") or 0))
+    if _expire_if_overdue(action_id):
+        # The bound passed during the call: the timeout outcome stands (with
+        # any completed fix step), the late answer is kept for the operator,
+        # and no further attempt is scheduled.
+        db.triage_action_update(action_id, late_outcome=step.state or "pr_pending")
+        return
     if step.state is None:
         db.triage_action_update(action_id, attempts=step.attempts, expected_phase=expected)
         return
@@ -333,6 +364,22 @@ def _checkpoint_fix(action_id: str, proposal_id: str, from_phase: str) -> bool:
     )
 
 
+async def _pr_task(action_id: str) -> None:
+    """The PR step as a tracked task holding its slot until the call exits,
+    so the tick (and its expiry checks) never waits on GitHub."""
+    try:
+        await _run_pr(action_id)
+    finally:
+        _release(action_id)
+
+
+def _spawn_pr(action_id: str) -> None:
+    """Start the PR step for an action whose slot the caller holds."""
+    _holds[action_id].task = asyncio.create_task(
+        _pr_task(action_id), name=f"bugalizer-triage-pr-{action_id}"
+    )
+
+
 async def _run_task(action_id: str) -> None:
     """An LLM action, run as a tracked task holding its slot until it exits."""
     try:
@@ -347,6 +394,10 @@ async def _run_task(action_id: str) -> None:
             result = ex.Result("failed", message, ex.compound_steps(
                 {"step": "fix", "state": "failed", "message": message}
             ) if row["kind"] == "fix_and_open_pr" else None)
+        if _expire_if_overdue(action_id):
+            # Finished late: the posted outcome stands, the PR step never runs.
+            db.triage_action_update(action_id, late_outcome=result.outcome)
+            return
         if result.outcome == "fix_done":
             if not _checkpoint_fix(action_id, result.proposal_id or "", "dispatched"):
                 db.triage_action_update(action_id, late_outcome="fix_done")
@@ -372,11 +423,11 @@ async def _dispatch(row: dict[str, Any], outcome: TickOutcome, *, from_phase: st
             _run_task(action_id), name=f"bugalizer-triage-{action_id}"
         )
         return
+    if kind == "open_pr":
+        _spawn_pr(action_id)
+        return
     try:
-        if kind == "open_pr":
-            await _run_pr(action_id)
-        else:
-            _finish(action_id, ex.run_inline(row), expected_phase="dispatched")
+        _finish(action_id, ex.run_inline(row), expected_phase="dispatched")
     finally:
         _release(action_id)
 
@@ -399,13 +450,17 @@ async def _claim_and_start(api: _Api, project: dict[str, Any], action: dict[str,
         if row is None or report is None:
             return
         auth = ex.authorize(project, report, action)
+        if auth.refusal is not None:
+            # Finish straight from `reserved`, in one write. A refused action
+            # never gets an `intent` row, so recovery (which dispatches intent
+            # rows without re-authorizing) can never run it; a crash before
+            # this write leaves it reserved, and the next tick re-authorizes.
+            _finish(action_id, auth.refusal, expected_phase="reserved")
+            return
         if not db.triage_action_update(
             action_id, expected_phase="reserved", phase="intent", intent_at=_now_iso(),
             pinned_llm=auth.pinned, no_auto_retry=int(auth.no_auto_retry),
         ):
-            return
-        if auth.refusal is not None:
-            _finish(action_id, auth.refusal, expected_phase="intent")
             return
         await _dispatch(db.triage_action_get(action_id), outcome, from_phase="intent")
     finally:
@@ -418,10 +473,7 @@ async def _apply_evidence(row: dict[str, Any], found: ex.Result, outcome: TickOu
     if found.outcome == "fix_done":
         if _checkpoint_fix(action_id, found.proposal_id or "", row["phase"]):
             if _try_hold(action_id, row["report_id"], llm=False):
-                try:
-                    await _run_pr(action_id)
-                finally:
-                    _release(action_id)
+                _spawn_pr(action_id)
         return
     _finish(action_id, found, expected_phase=row["phase"])
 
@@ -437,21 +489,18 @@ async def _recover(row: dict[str, Any], outcome: TickOutcome) -> None:
 
     if phase == "fix_done":
         if _try_hold(action_id, row["report_id"], llm=False):
-            try:
-                await _run_pr(action_id)
-            finally:
-                _release(action_id)
+            _spawn_pr(action_id)
         return
 
     if phase == "dispatched" and not llm:
         # Inline kinds crashed mid-call, or open-pr said in_progress: all
         # spend nothing and are idempotent, so run them again.
         if _try_hold(action_id, row["report_id"], llm=False):
+            if kind == "open_pr":
+                _spawn_pr(action_id)
+                return
             try:
-                if kind == "open_pr":
-                    await _run_pr(action_id)
-                else:
-                    _finish(action_id, ex.run_inline(row), expected_phase="dispatched")
+                _finish(action_id, ex.run_inline(row), expected_phase="dispatched")
             finally:
                 _release(action_id)
         return
@@ -602,6 +651,7 @@ async def sync_project(project_id: str, *, manual: bool = False) -> TickOutcome:
             outcome.error = NOT_CONFIGURED
             return outcome
         token = ""
+        expire_overdue(project_id)  # before any HTTP: the bound never waits on sonicgrid
         try:
             if _duplicate_source(project, base):
                 outcome.error = DUPLICATE_SOURCE
@@ -644,6 +694,10 @@ async def sync_project(project_id: str, *, manual: bool = False) -> TickOutcome:
 
 async def run_tick() -> None:
     """Sync every configured project once, honoring per-project backoff."""
+    try:
+        expire_overdue()  # every tick, even for projects in backoff
+    except Exception as exc:
+        logger.error("triage expiry sweep failed (%s)", type(exc).__name__)
     for project in db.projects_with_triage_sync():
         pid = project["id"]
         remaining = _skip.get(pid, 0)

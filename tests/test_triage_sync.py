@@ -108,6 +108,7 @@ class FakeTriage:
         self.drop_after_commit: set[str] = set()   # POST ids: commit, then lose the response
         self.drop_terminal: set[str] = set()       # same, for a terminal POST only
         self.drop_put_once: set[str] = set()       # PUT bug ids: lose the request entirely
+        self.down = False                          # every request answers 502
         self._n = 0
 
     @staticmethod
@@ -151,6 +152,8 @@ class FakeTriage:
             if predicate(request):
                 del self.rules[i]
                 return respond(request)
+        if self.down:
+            return httpx.Response(502, json={"error": "db"})
         if request.headers.get("authorization") != f"Bearer {TOKEN}":
             return httpx.Response(401, json={"error": "unauthorized"})
         if request.method == "GET" and path == "/actions":
@@ -239,6 +242,8 @@ class FakeStages:
         self.fix = "proposed"
         self.gate: Optional[asyncio.Event] = None
         self.pr: list[Any] = []
+        self.pr_gate: Optional[asyncio.Event] = None
+        self.pr_hook: Optional[Callable[[], None]] = None   # runs inside the PR call
 
     async def run_local_analysis(self, report_id, *, triage_llm=None, localize_llm=None, trigger_ref=None):
         self.calls.append(("local", report_id, triage_llm, localize_llm, trigger_ref))
@@ -272,6 +277,10 @@ class FakeStages:
 
     async def open_pull_request(self, report_id, proposal_id):
         self.calls.append(("pr", report_id, proposal_id))
+        if self.pr_gate is not None:
+            await self.pr_gate.wait()
+        if self.pr_hook is not None:
+            self.pr_hook()
         nxt = self.pr.pop(0) if self.pr else None
         if isinstance(nxt, Exception):
             raise nxt
@@ -643,8 +652,10 @@ async def test_open_pr_in_progress_stays_claimed_then_finishes(fake, stages):
     make_report(pid, bug(1), fake, status="fix_proposed")
     aid = fake.add_action("open_pr", bug(1))
     await ts.sync_project(pid)
-    assert fake.actions[aid]["state"] == "claimed"
+    await ts.wait_idle()
     await ts.sync_project(pid)
+    assert fake.actions[aid]["state"] == "claimed"   # in_progress: not an outcome
+    await settle(pid)
     assert fake.actions[aid]["state"] == "done"
     assert "https://github.com/o/r/pull/7" in fake.actions[aid]["message"]
 
@@ -655,7 +666,7 @@ async def test_open_pr_refusals_carry_the_existing_pr_url(fake, stages):
     pid = make_project()
     make_report(pid, bug(1), fake, status="fix_proposed")
     aid = fake.add_action("open_pr", bug(1))
-    await ts.sync_project(pid)
+    await settle(pid)
     assert fake.actions[aid]["state"] == "refused"
     assert "https://github.com/o/r/pull/2" in fake.actions[aid]["message"]
 
@@ -829,6 +840,163 @@ async def test_terminal_ack_lost_then_drained_from_the_ledger_after_restart(fake
     assert [q for q in fake.requests if q["method"] == "GET"]
     assert fake.posts(aid) == [{"state": "done", "message": "Analysis mode set to hold"}]
     assert ledger(aid)["terminal_acked"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["allowlist", "non_local", "consent"])
+async def test_a_crash_before_a_refusal_is_recorded_never_runs_the_action(
+        fake, stages, monkeypatch, case):
+    """impl r1 P1: a refusal is finished straight from `reserved`, so a crash
+    before that write leaves nothing recovery could dispatch."""
+    if case == "allowlist":
+        pid = make_project(fix_llm_provider="anthropic")
+        make_report(pid, bug(1), fake)
+        aid = fake.add_action("analyze_cloud", bug(1), email=DAN, user="u-dan")
+    elif case == "non_local":
+        pid = make_project(llm_provider="anthropic", llm_model="claude-x")
+        make_report(pid, bug(1), fake)
+        aid = fake.add_action("analyze_local", bug(1))
+    else:
+        pid = make_project()
+        make_report(pid, bug(1), fake)
+        aid = fake.add_action("fix_and_open_pr", bug(1),
+                              consents={"cloudSpend": True, "repoWrite": False})
+    original = db.triage_action_finish
+
+    def crash(*args, **kwargs):
+        raise RuntimeError("process stopped before the refusal was written")
+
+    monkeypatch.setattr(db, "triage_action_finish", crash)
+    out = await ts.sync_project(pid)
+    assert out.error == ts.INTERNAL_ERROR
+    assert ledger(aid)["phase"] == "reserved"   # never an authorized intent
+    monkeypatch.setattr(db, "triage_action_finish", original)
+    ts.reset_runtime_state()
+    await settle(pid)
+    assert stages.calls == []
+    assert fake.actions[aid]["state"] == "refused"
+
+
+@pytest.mark.asyncio
+async def test_an_overdue_fix_finishing_between_ticks_never_opens_a_pr(fake, stages):
+    """impl r1 P1: the bound is checked when the task completes, without
+    waiting for the next listing."""
+    stages.gate = asyncio.Event()
+    pid = make_project()
+    make_report(pid, bug(1), fake)
+    aid = fake.add_action("fix_and_open_pr", bug(1))
+    await ts.sync_project(pid)
+    await asyncio.sleep(0)
+    db.triage_action_update(aid, intent_at="2000-01-01T00:00:00+00:00")
+    stages.gate.set()
+    await ts.wait_idle()                  # no tick in between
+    assert stages.kinds() == ["fix"]
+    row = ledger(aid)
+    assert (row["outcome"], row["late_outcome"]) == ("failed", "fix_done")
+    assert "timed out" in row["message"]
+    await ts.sync_project(pid)
+    assert fake.actions[aid]["state"] == "failed"
+    assert [s["state"] for s in fake.actions[aid]["steps"]] == ["failed", "skipped"]
+
+
+@pytest.mark.asyncio
+async def test_the_bound_holds_through_a_sonicgrid_outage(fake, stages, monkeypatch):
+    """impl r1 P1: expiry does not depend on a successful action walk, and the
+    project's backoff does not stretch it."""
+    stages.gate = asyncio.Event()
+    pid = make_project()
+    make_report(pid, bug(1), fake)
+    aid = fake.add_action("analyze_local", bug(1))
+    await ts.run_tick()
+    await asyncio.sleep(0)
+    assert ts._task_running(aid)
+    fake.down = True
+    await ts.run_tick()                   # upstream_error: no listing
+    assert ledger(aid)["phase"] == "dispatched"
+    monkeypatch.setattr(settings, "triage_action_timeout_minutes", 0.0)
+    ts._skip[pid] = 5                     # in backoff as well
+    await ts.run_tick()
+    assert ledger(aid)["outcome"] == "failed" and "timed out" in ledger(aid)["message"]
+    assert ts._task_running(aid)          # the slot is held until the task exits
+    stages.gate.set()
+    await ts.wait_idle()
+    assert ledger(aid)["late_outcome"] == "done"
+    fake.down = False
+    ts._skip.clear()
+    await ts.run_tick()
+    assert fake.actions[aid]["state"] == "failed"
+
+
+def _age(aid: str) -> Callable[[], None]:
+    return lambda: db.triage_action_update(aid, intent_at="2000-01-01T00:00:00+00:00")
+
+
+@pytest.mark.asyncio
+async def test_a_standalone_pr_call_crossing_the_deadline_keeps_the_timeout(fake, stages):
+    """impl r2 P2: the bound is re-checked after the awaited PR call."""
+    pid = make_project()
+    make_report(pid, bug(1), fake, status="fix_proposed")
+    aid = fake.add_action("open_pr", bug(1))
+    stages.pr_hook = _age(aid)
+    await settle(pid)
+    row = ledger(aid)
+    assert (row["outcome"], row["late_outcome"]) == ("failed", "done")
+    assert fake.actions[aid]["state"] == "failed"
+    assert "timed out" in fake.actions[aid]["message"]
+    assert stages.kinds() == ["pr"]
+
+
+@pytest.mark.asyncio
+async def test_a_compound_pr_call_crossing_the_deadline_keeps_the_fix_step(fake, stages):
+    pid = make_project()
+    r = make_report(pid, bug(1), fake, status="fix_proposed")
+    aid = fake.add_action("fix_and_open_pr", bug(1), state="claimed")
+    _seed_intent(pid, r["id"], aid, "fix_and_open_pr", pinned={"fix": ["ollama", "m"]},
+                 no_auto_retry=False, phase="dispatched")
+    db.triage_action_update(aid, phase="fix_done", fix_proposal_id="fp_1",
+                            steps=[{"step": "fix", "state": "done", "ref": "fp_1"}])
+    stages.pr_hook = _age(aid)
+    await settle(pid)
+    action = fake.actions[aid]
+    assert action["state"] == "failed"
+    assert [(s["state"], s.get("ref")) for s in action["steps"]] == [("done", "fp_1"), ("failed", None)]
+    assert ledger(aid)["late_outcome"] == "done"
+    assert "fix" not in stages.kinds()
+
+
+@pytest.mark.asyncio
+async def test_a_transient_pr_failure_crossing_the_deadline_schedules_no_retry(fake, stages):
+    pid = make_project()
+    make_report(pid, bug(1), fake, status="fix_proposed")
+    aid = fake.add_action("open_pr", bug(1))
+    stages.pr = [OpenPrError(502, "github_error", "x")]
+    stages.pr_hook = _age(aid)
+    await settle(pid, ticks=3)
+    row = ledger(aid)
+    assert (row["outcome"], row["late_outcome"], row["attempts"]) == ("failed", "pr_pending", 0)
+    assert stages.kinds() == ["pr"]       # never attempted again
+
+
+@pytest.mark.asyncio
+async def test_expiry_applies_while_a_pr_call_is_still_waiting(fake, stages, monkeypatch):
+    """The PR step no longer blocks the tick, so the bound is applied locally
+    while GitHub has not answered; the slot stays held until the call exits."""
+    stages.pr_gate = asyncio.Event()
+    pid = make_project()
+    make_report(pid, bug(1), fake, status="fix_proposed")
+    aid = fake.add_action("open_pr", bug(1))
+    # Returns while the PR call waits (bounded, so a blocking tick fails, not hangs).
+    await asyncio.wait_for(ts.sync_project(pid), timeout=5)
+    await asyncio.sleep(0)
+    assert ts._task_running(aid)
+    monkeypatch.setattr(settings, "triage_action_timeout_minutes", 0.0)
+    await ts.sync_project(pid)
+    assert fake.actions[aid]["state"] == "failed"
+    assert ts._task_running(aid)
+    stages.pr_gate.set()
+    await ts.wait_idle()
+    assert ledger(aid)["late_outcome"] == "done"
+    assert aid not in ts._holds
 
 
 # ---------------------------------------------------------------------------
