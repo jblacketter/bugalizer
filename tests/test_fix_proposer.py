@@ -528,6 +528,22 @@ async def test_override_reaches_complete_and_attributes_usage(tmp_path, caplog):
 
 
 @pytest.mark.asyncio
+async def test_fix_call_uses_configured_timeout(tmp_path):
+    """Stage 4 passes settings.fix_timeout_seconds, not the 120s client default."""
+    report, _ = _seed_fixture_report(tmp_path)
+    mock_llm = AsyncMock(return_value=_make_llm_response_for_proposal(_valid_proposal_payload()))
+    original = settings.fix_timeout_seconds
+    settings.fix_timeout_seconds = 777
+    try:
+        with patch("bugalizer.pipeline.fix_proposer.llm_client.complete", new=mock_llm):
+            await propose_fix(report["id"])
+    finally:
+        settings.fix_timeout_seconds = original
+
+    assert mock_llm.await_args.kwargs["timeout"] == 777
+
+
+@pytest.mark.asyncio
 async def test_override_partial_fields_fall_back(tmp_path):
     """Model only: provider comes from project/global resolution; no request
     key means key_source=env and no key_ref even if... none was given."""

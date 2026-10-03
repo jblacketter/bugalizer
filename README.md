@@ -139,6 +139,7 @@ All settings use the `BUGALIZER_` environment variable prefix. See [`.env.exampl
 | `BUGALIZER_ANTHROPIC_API_KEY` | _(unset; required for Stage 4)_ | Cloud API key for Anthropic |
 | `BUGALIZER_FIX_MAX_BUNDLE_BYTES` | `4194304` | Total file-bundle byte cap for Stage 4 |
 | `BUGALIZER_FIX_MAX_FILE_BYTES` | `524288` | Per-file byte cap for Stage 4 |
+| `BUGALIZER_FIX_TIMEOUT_SECONDS` | `600` | Timeout for the Stage 4 LLM call (slow local models need more than 120s) |
 | `BUGALIZER_FIX_ENABLE_PROMPT_CACHING` | `true` | Use Anthropic prompt caching for the fix-stage system prompt |
 
 Bugalizer also honors a generic `QA_LLM_MODEL` / `QA_LLM_API_BASE` fallback layer for hosts that configure LLM access once across apps — explicit `BUGALIZER_*` settings always win. See `docs/phases/architecture.md` ("LLM tiering").

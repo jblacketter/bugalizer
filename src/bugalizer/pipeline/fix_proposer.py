@@ -415,6 +415,7 @@ async def propose_fix(
             messages=messages,
             provider=fix_provider,
             api_key=request_key,
+            timeout=settings.fix_timeout_seconds,
         )
 
         # 4. Parse + validate.
