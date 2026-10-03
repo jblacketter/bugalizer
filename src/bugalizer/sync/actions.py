@@ -325,12 +325,27 @@ def run_inline(row: dict[str, Any]) -> Result:
 # Recovery evidence (rows tagged with this action's id only)
 # ---------------------------------------------------------------------------
 
+def _finished_rows(action_id: str) -> list[dict[str, Any]]:
+    """This action's analysis rows, minus attempts cut off by a restart.
+
+    `release_orphaned_claims` fails a dead process's `running` rows with
+    `interrupted: true` so retry caps count them. The run did not finish, so
+    the row is no outcome: recovery re-runs free work and reports paid work
+    as unconfirmed, as if the row were still `running`.
+    """
+    return [
+        a for a in db.analyses_by_trigger(action_id)
+        if not (isinstance(a.get("result"), dict) and a["result"].get("interrupted"))
+    ]
+
+
 def evidence(row: dict[str, Any]) -> Optional[Result]:
     """The finished outcome this action's own stage rows show, or None when
-    they show nothing finished (no rows, or a row still `running`)."""
+    they show nothing finished (no rows, a row still `running`, or only
+    interrupted attempts)."""
     action_id, kind = row["action_id"], row["kind"]
     if kind == "analyze_local":
-        rows = db.analyses_by_trigger(action_id)
+        rows = _finished_rows(action_id)
         loc = [a for a in rows if a.get("phase") == "localization"]
         if any(a.get("status") == "completed" for a in loc):
             return Result("done", "Local analysis finished: localization written")
@@ -344,7 +359,7 @@ def evidence(row: dict[str, Any]) -> Optional[Result]:
             if kind == "fix_and_open_pr":
                 return Result("fix_done", proposal_id=pid)
             return Result("done", f"Fix proposal {pid} made", proposal_id=pid)
-        failed = [a for a in db.analyses_by_trigger(action_id)
+        failed = [a for a in _finished_rows(action_id)
                   if a.get("phase") == "fix" and a.get("status") == "failed"]
         if failed:
             message = "The fix proposal failed; see Bugalizer for the error"

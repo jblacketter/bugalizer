@@ -767,6 +767,49 @@ async def test_tagged_evidence_is_adopted_after_a_restart(fake, stages):
 
 
 @pytest.mark.asyncio
+async def test_an_interrupted_analyze_local_is_rerun_after_startup_release(fake, stages):
+    """Restart while the action's triage row is `running`: the startup release
+    fails that row as interrupted, which is no outcome, so recovery re-runs the
+    free work and the action finishes done (acceptance step 8)."""
+    pid = make_project()
+    r = make_report(pid, bug(1), fake, localized=False)
+    aid = fake.add_action("analyze_local", bug(1), state="claimed")
+    _seed_intent(pid, r["id"], aid, "analyze_local",
+                 pinned={"triage": ["ollama", "m"], "localization": ["ollama", "m"]},
+                 no_auto_retry=False, phase="dispatched")
+    assert db.try_claim_report(r["id"], "triaged", "analyzing")
+    db.analysis_create(r["id"], "triage", "running", trigger_ref=aid)
+
+    db.release_orphaned_claims()
+    ts.reset_runtime_state()
+    await settle(pid)
+
+    assert stages.kinds() == ["local"]
+    assert fake.actions[aid]["state"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_analyze_cloud_is_unconfirmed_not_rerun(fake, stages):
+    pid = make_project()
+    r = make_report(pid, bug(1), fake)
+    aid = fake.add_action("analyze_cloud", bug(1), state="claimed")
+    _seed_intent(pid, r["id"], aid, "analyze_cloud", pinned={"fix": ["anthropic", "m"]},
+                 no_auto_retry=True, phase="dispatched")
+    assert db.try_claim_report(r["id"], "triaged", "fix_proposing")
+    # Even if an interrupted fix row carried the tag, it is not an outcome.
+    db.analysis_create(r["id"], "fix", "failed", trigger_ref=aid,
+                       result={"error": "x", "interrupted": True, "permanent": True})
+
+    db.release_orphaned_claims()
+    ts.reset_runtime_state()
+    await settle(pid)
+
+    assert stages.calls == []
+    assert fake.actions[aid]["state"] == "failed"
+    assert "could not be confirmed" in fake.actions[aid]["message"]
+
+
+@pytest.mark.asyncio
 async def test_lost_claim_acknowledgement_dispatches_exactly_once(fake, stages):
     pid = make_project()
     make_report(pid, bug(1), fake)

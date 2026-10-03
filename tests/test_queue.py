@@ -657,3 +657,22 @@ def test_repeated_interrupted_triage_exhausts_the_retry_budget():
 
     assert triage_eligible_reports() == []
     assert len(analyses_for_report(rid, phase="triage")) == settings.max_triage_retries
+
+
+def test_a_failure_stamped_just_ahead_of_the_clock_is_not_inside_a_zero_delay():
+    """_now() nudges stored timestamps past the raw clock on a coarse (Windows)
+    tick; elapsed must not come out negative and block a zero retry delay."""
+    from bugalizer.config import settings
+    from bugalizer.db import _retry_blocked
+    settings.retry_delay_seconds = 0
+    # Far enough ahead that it is still "future" whenever the assertion runs.
+    ahead = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    proj = _make_project()
+    rid = _make_report(proj["id"])["id"]
+    report_update_status(rid, "triaged")
+    analysis_create(bug_report_id=rid, phase="triage", status="failed",
+                    result={"error": "x"}, completed_at=ahead)
+
+    assert [r["id"] for r in triage_eligible_reports()] == [rid]
+    assert not _retry_blocked([{"status": "failed", "completed_at": ahead}],
+                              3, 0, datetime.now(timezone.utc))
