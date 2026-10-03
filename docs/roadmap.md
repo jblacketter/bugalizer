@@ -222,14 +222,15 @@ tree-sitter / uv
 - **Depends on:** Phase 10, Phase 8
 
 ### Phase 12: per-user-cloud-keys
-- **Status:** B4, proposed 2026-09-30 (later), not queued; after Phase 11 once someone besides Jack
-  needs cloud analysis. Pairs with sonicgrid's S3 `sonicgrid-ai-settings`.
-- **Description:** Nobody spends Jack's cloud accounts but Jack (E4). Each sonicgrid
-  user enters their own Anthropic or Codex/OpenAI key and model on a sonicgrid AI
-  settings page (like the Aegis AI settings); a cloud action carries that key, which
-  Bugalizer uses for that call only through Phase 7's per-request override and never
-  stores or logs.
-- **Depends on:** Phase 11
+- **Status:** B4, plan 2026-10-03 (`docs/phases/per-user-cloud-keys.md`, cross-repo; decisions
+  F1 to F7, Jack). Pairs with sonicgrid's S3 `sonicgrid-ai-settings` and S4 `sonicgrid-bug-board`.
+- **Description:** Nobody spends another person's cloud key (E4, F3). Each sonicgrid admin
+  saves their own Claude key and default model on a sonicgrid AI settings page (like the
+  Aegis AI settings); Bugalizer fetches the requester's key once per paid action and uses it
+  for that call only through Phase 7's per-request override, never storing or logging it.
+  The cloud allowlist is retired. Bugalizer also pushes a six-lane `stage` for sonicgrid's
+  new board, and reads fix PRs' state on GitHub so a merged PR completes the bug.
+- **Depends on:** Phase 11, Phase 8
 
 ## Decision Log
 See `docs/decision_log.md`
