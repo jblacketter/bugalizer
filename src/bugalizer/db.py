@@ -810,6 +810,38 @@ def try_claim_report(
     return cursor.rowcount == 1
 
 
+# Transient stage claims and the status each one rolls back to; the same
+# rollbacks the pipeline's own failure paths perform. `fix_approved` is not
+# listed: open-pr owns its claim and adopts abandoned ones (`adopt_claim`).
+ORPHANED_CLAIM_ROLLBACK = {
+    "validating": "submitted",
+    "analyzing": "triaged",
+    "fix_proposing": "triaged",
+}
+
+
+@retry_on_locked
+def release_orphaned_claims() -> dict[str, int]:
+    """Roll back stage claims left behind by a process that died mid-stage.
+
+    Call once at startup, before any worker or sync loop starts: nothing in
+    the new process can hold these claims yet, so every report still sitting
+    in one belongs to a dead process. Returns {claimed_status: count}.
+    """
+    conn = _get_conn()
+    now = _now()
+    released: dict[str, int] = {}
+    for claimed, rollback in ORPHANED_CLAIM_ROLLBACK.items():
+        cursor = conn.execute(
+            "UPDATE bug_reports SET status = ?, updated_at = ? WHERE status = ?",
+            (rollback, now, claimed),
+        )
+        if cursor.rowcount:
+            released[claimed] = cursor.rowcount
+    conn.commit()
+    return released
+
+
 @retry_on_locked
 def adopt_claim(report_id: str, observed_token: Optional[str], new_token: str) -> bool:
     """Take over an abandoned `fix_approved` claim (Phase 8).

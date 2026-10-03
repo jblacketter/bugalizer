@@ -556,3 +556,66 @@ def test_file_db_connections_are_per_thread(tmp_path):
     finally:
         settings.db_path = ":memory:"
         db.reset_conn()
+
+
+# ---------------------------------------------------------------------------
+# Orphaned stage claims (process died mid-stage)
+# ---------------------------------------------------------------------------
+
+def _claimed_report(project_id, claimed_status):
+    """A report left in `claimed_status`, as a killed process would leave it."""
+    from bugalizer import db
+    report = _make_report(project_id)
+    if claimed_status == "validating":
+        assert db.try_claim_report(report["id"], "submitted", "validating")
+    else:
+        report_update_status(report["id"], "triaged")
+        assert db.try_claim_report(report["id"], "triaged", claimed_status)
+    return report["id"]
+
+
+def test_release_orphaned_claims_rolls_back_each_stage():
+    from bugalizer.db import release_orphaned_claims
+    proj = _make_project()
+    validating = _claimed_report(proj["id"], "validating")
+    analyzing = _claimed_report(proj["id"], "analyzing")
+    fixing = _claimed_report(proj["id"], "fix_proposing")
+    untouched = _make_report(proj["id"])["id"]
+
+    released = release_orphaned_claims()
+
+    assert released == {"validating": 1, "analyzing": 1, "fix_proposing": 1}
+    assert report_get(validating)["status"] == "submitted"
+    assert report_get(analyzing)["status"] == "triaged"
+    assert report_get(fixing)["status"] == "triaged"
+    assert report_get(untouched)["status"] == "submitted"
+
+
+def test_release_orphaned_claims_leaves_settled_and_open_pr_reports_alone():
+    from bugalizer.db import release_orphaned_claims
+    proj = _make_project()
+    ids = {}
+    for status in ("triaged", "clarification_needed", "fix_proposed", "fix_approved", "closed"):
+        rid = _make_report(proj["id"])["id"]
+        report_update_status(rid, status)
+        ids[status] = rid
+
+    assert release_orphaned_claims() == {}
+    for status, rid in ids.items():
+        assert report_get(rid)["status"] == status
+
+
+def test_release_orphaned_claims_is_a_noop_on_a_clean_db():
+    from bugalizer.db import release_orphaned_claims
+    assert release_orphaned_claims() == {}
+
+
+@pytest.mark.asyncio
+async def test_startup_releases_orphaned_claims():
+    """The app's lifespan runs the release before any loop starts."""
+    from bugalizer.main import app, lifespan
+    proj = _make_project()
+    analyzing = _claimed_report(proj["id"], "analyzing")
+
+    async with lifespan(app):
+        assert report_get(analyzing)["status"] == "triaged"
