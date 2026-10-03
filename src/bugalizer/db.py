@@ -1053,7 +1053,9 @@ def triage_eligible_reports() -> list[dict[str, Any]]:
         latest = triage_rows[0]
         if latest["status"] == "failed" and latest["completed_at"]:
             completed = datetime.fromisoformat(latest["completed_at"])
-            elapsed = (now - completed).total_seconds()
+            # Clamped: _now() may store a timestamp a few µs ahead of the
+            # raw clock (coarse Windows tick), which would read as negative.
+            elapsed = max(0.0, (now - completed).total_seconds())
             if elapsed < retry_delay:
                 continue  # Within retry delay window
 
@@ -1124,7 +1126,8 @@ def _retry_blocked(
     completed_at = latest.get("completed_at")
     if completed_at:
         try:
-            elapsed = (now - datetime.fromisoformat(completed_at)).total_seconds()
+            # Clamped for the same reason as in triage_eligible_reports.
+            elapsed = max(0.0, (now - datetime.fromisoformat(completed_at)).total_seconds())
         except ValueError:
             return False
         if elapsed < retry_delay:

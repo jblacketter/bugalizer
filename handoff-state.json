@@ -1,29 +1,13 @@
 {
-  "phase": "phase-11-acceptance-fixes",
+  "phase": "phase-11-restart-recovery",
   "type": "impl",
-  "round": 2,
+  "round": 1,
   "status": "done",
   "command": "Read the handoff contract (`tagteam contract`; in Claude Code: /tagteam:handoff) and handoff-state.json, then act on your turn",
   "result": "approved",
   "updated_by": "codex",
   "run_mode": "single-phase",
   "history": [
-    {
-      "turn": null,
-      "status": "done",
-      "timestamp": "2026-09-30T04:26:18.796025+00:00",
-      "phase": "sonicgrid-ingest",
-      "round": 2,
-      "updated_by": "codex"
-    },
-    {
-      "turn": "reviewer",
-      "status": "ready",
-      "timestamp": "2026-09-30T04:37:09.972874+00:00",
-      "phase": "sonicgrid-ingest",
-      "round": 1,
-      "updated_by": "claude"
-    },
     {
       "turn": "lead",
       "status": "ready",
@@ -167,8 +151,24 @@
       "phase": "phase-11-acceptance-fixes",
       "round": 2,
       "updated_by": "claude"
+    },
+    {
+      "turn": null,
+      "status": "done",
+      "timestamp": "2026-10-03T03:42:57.165295+00:00",
+      "phase": "phase-11-acceptance-fixes",
+      "round": 2,
+      "updated_by": "codex"
+    },
+    {
+      "turn": "reviewer",
+      "status": "ready",
+      "timestamp": "2026-10-03T04:16:25.973392+00:00",
+      "phase": "phase-11-restart-recovery",
+      "round": 1,
+      "updated_by": "claude"
     }
   ],
-  "seq": 72,
-  "updated_at": "2026-10-03T03:42:57.165295+00:00"
+  "seq": 74,
+  "updated_at": "2026-10-03T04:17:25.398813+00:00"
 }

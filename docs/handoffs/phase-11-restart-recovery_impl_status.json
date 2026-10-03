@@ -1,0 +1,21 @@
+{
+  "state": "approved",
+  "ready_for": null,
+  "round": 1,
+  "phase": "phase-11-restart-recovery",
+  "type": "impl",
+  "lead": "claude",
+  "reviewer": "codex",
+  "date": "2026-10-03",
+  "baseline": {
+    "sha": "a9b4078e2a460f2f0d1c9ecbb63999864e3031d8",
+    "dirty_paths": [
+      " M src/bugalizer/db.py",
+      " M src/bugalizer/sync/actions.py",
+      " M tests/test_queue.py",
+      " M tests/test_triage_sync.py"
+    ],
+    "captured_at": "2026-10-03T04:16:25.970324+00:00",
+    "source": "impl-init-fallback"
+  }
+}
