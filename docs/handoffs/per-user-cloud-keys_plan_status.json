@@ -1,0 +1,31 @@
+{
+  "state": "approved",
+  "ready_for": null,
+  "round": 3,
+  "phase": "per-user-cloud-keys",
+  "type": "plan",
+  "lead": "claude",
+  "reviewer": "codex",
+  "date": "2026-10-03",
+  "baseline": {
+    "sha": "b2078bb58bc2ca6f0e6d10759fc9123c9699b225",
+    "dirty_paths": [
+      " M docs/roadmap.md",
+      "?? docs/phases/per-user-cloud-keys.md"
+    ],
+    "captured_at": "2026-10-03T05:19:44.394848+00:00",
+    "source": "plan-init"
+  },
+  "impl_boundary": {
+    "sha": "b2078bb58bc2ca6f0e6d10759fc9123c9699b225",
+    "dirty": {
+      "docs/roadmap.md": "22e0e0d0a31684ddd9956a6656cf93390293c3daac6cd51a10eedd0faad445a2",
+      "handoff-state.json": "34b7834ff7606840059954993c625d90ba255a484ce62687caad9c4ff4fd21b7",
+      "docs/handoffs/per-user-cloud-keys_plan_rounds.jsonl": "ffaab33e5603b8e7b7bc7cc5e020b5d5d92c01e46a1b24193772caeb96c68fbe",
+      "docs/handoffs/per-user-cloud-keys_plan_status.json": "9a7a3b412e84651551adc3f45772f6b9e93c8e582ec50e331d4081e13de50293",
+      "docs/phases/per-user-cloud-keys.md": "ad52c5645c4a3a493cf01b293eaea1386179dd7c50151e39e9052fef754aabce"
+    },
+    "captured_at": "2026-10-03T05:27:24.927574+00:00",
+    "source": "plan-approve"
+  }
+}
