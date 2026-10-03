@@ -132,9 +132,10 @@ def _extract_json(text: str) -> dict[str, Any]:
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```\s*$", "", text)
-    # First try whole text as JSON
+    # First try whole text as JSON. strict=False accepts raw newlines/tabs
+    # inside strings, which local models emit in the `diff` field.
     try:
-        return json.loads(text)
+        return json.loads(text, strict=False)
     except json.JSONDecodeError:
         pass
     # Fall back: find first { ... matching }
@@ -149,7 +150,7 @@ def _extract_json(text: str) -> dict[str, Any]:
             depth -= 1
             if depth == 0:
                 try:
-                    return json.loads(text[start:i + 1])
+                    return json.loads(text[start:i + 1], strict=False)
                 except json.JSONDecodeError as exc:
                     raise FixProposalError(
                         f"Extracted candidate JSON is malformed: {exc}"

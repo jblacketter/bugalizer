@@ -153,6 +153,13 @@ def test_extract_json_finds_first_object_in_prose():
     assert out == {"a": 1}
 
 
+def test_extract_json_accepts_raw_newlines_in_strings():
+    """Local models put literal newlines in the diff string instead of \\n."""
+    raw = '{"root_cause": "x", "diff": "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n"}'
+    out = _extract_json(raw)
+    assert out["diff"].startswith("--- a/f\n+++ b/f")
+
+
 def test_extract_json_raises_when_no_object():
     with pytest.raises(FixProposalError):
         _extract_json("no json here")
