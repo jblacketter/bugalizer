@@ -200,9 +200,10 @@ tree-sitter / uv
 
 ### Phase 11: sonicgrid-triage-sync
 - **Status:** B3, impl codex-approved 2026-10-02 (impl round 3; plan round 3;
-  `docs/phases/sonicgrid-triage-sync.md`). PR #10 merged before review; the r1/r2 fixes
-  are on branch `phase-11/review-fixes` (merge that before enabling the sync on BOWIE). Acceptance on BOWIE after merge:
-  `docs/sonicgrid-triage-acceptance.md`. Direction:
+  `docs/phases/sonicgrid-triage-sync.md`). Merged: PR #10, review fixes PR #11, and the
+  acceptance fixes PR #12 (fix-stage robustness, orphaned-claim release) and PR #13
+  (interrupted rows are not sync evidence). Live on BOWIE at `b2078bb` with triage sync on.
+  Acceptance walk: `docs/sonicgrid-triage-acceptance.md`; results below. Direction:
   `~/projects/QA/docs/bugalizer-sonicgrid-triage-direction-2026-09-30.html`
   (rulings E1 to E6, Jack; first users Jack and Dan). Pairs with
   sonicgrid's S2 `sonicgrid-triage`, whose contract document it builds against.
@@ -220,6 +221,42 @@ tree-sitter / uv
 - **Needs (outside this repo):** sonicgrid S2's contract document: landed as
   `documentation/BUGALIZER-TRIAGE-ENDPOINTS.md` (sonicgrid `9ce7fe50`, PR #618), hosted acceptance 2026-09-30.
 - **Depends on:** Phase 10, Phase 8
+- **BOWIE acceptance results (2026-10-02/03, walked by Jack with Claude; details in the
+  PR #12 and #13 verify comments):**
+  - Step 1 configure: pass (`configure-sonicgrid-triage.ps1` prints CONFIGURED).
+  - Step 2 results appear in `/admin/bugs` "Bugalizer triage": pass.
+  - Step 4 Analyze (local): pass.
+  - Step 6 Analyze (cloud) as Jack: pass on `claude-sonnet-4-6` (BOWIE's Stage 4 is
+    now Anthropic; no local model follows the fix-proposal schema). Usage row
+    `key_source: env`, `key_ref: sonicgrid:<Jack's user id>`.
+  - Step 7: Open PR without a GitHub token refuses with `github_not_configured`.
+    The real "Fix and open PR" run waits for the token and a real sonicgrid bug.
+  - Step 8 restart survival: pass on `b2078bb` (failed before PR #12, regressed in
+    PR #12 round 2, fixed by PR #13).
+  - Steps 3 (reporter view) and 5 (non-allowlisted admin's cloud refusal): not run;
+    they need other sonicgrid accounts.
+- **Follow-ups found during acceptance (not yet fixed):**
+  - A paid fix call that fails validation or is cut off by a restart writes no
+    `token_usage` row, and Anthropic rows record `estimated_cost_usd: 0.0`, so cloud
+    spend is under-reported.
+  - A sonicgrid action on a bug Bugalizer never imported (e.g. one already resolved
+    before ingest started) stays queued forever; it counts in `unresolved_actions`
+    (4 on BOWIE). Refusing it with "not found in Bugalizer" would close it.
+  - Sonicgrid titles derive from the first description line, so reports filed with
+    the dialog's template get the title "What happened:".
+  - `_extract_json` returns the first object that parses; an example object in prose
+    ahead of the real one would win.
+  - The sonicgrid "Bugalizer triage" tab lists every pushed report forever, grouped by
+    status (deleted test reports show as "Rejected"). A hide filter would have to live
+    on the sonicgrid side.
+  - A project's own `llm_model` overrides the `BUGALIZER_DEFAULT_*_MODEL` env defaults;
+    both BOWIE projects carried `qwen2.5-coder:7b`, which BOWIE does not have, and were
+    cleared to `""`.
+- **Test-data cleanup (2026-10-03):** the 8 test bugs in sonicgrid's Active list were
+  marked resolved; 14 test reports were soft-deleted in Bugalizer (11 sonicgrid
+  imports, 3 smoke). Kept: `f8c0a9dbbe304f93` (real bug, GitHub issue #100). The
+  triage tab still shows 11 "Rejected" and 4 "Not analysed yet" entries (the latter
+  are the stuck actions above).
 
 ### Phase 12: per-user-cloud-keys
 - **Status:** B4, proposed 2026-09-30 (later), not queued; after Phase 11 once someone besides Jack

@@ -103,7 +103,7 @@ tests/
   `BUGALIZER_DEFAULT_*_MODEL` env defaults (clear it with PATCH `{"llm_model": ""}`); BOWIE runs
   `gemma4:12b` (triage) + `qwen2.5-coder:14b` (localize), `qwen2.5-coder:7b` is not installed.
 
-- **Phase 11 (sonicgrid-triage-sync, B3): codex-approved 2026-10-02 (impl round 3); PR #10 merged, review fixes on `phase-11/review-fixes` pending merge** (`docs/phases/sonicgrid-triage-sync.md`):
+- **Phase 11 (sonicgrid-triage-sync, B3): MERGED (PRs #10, #11; acceptance fixes #12, #13), live on BOWIE at `b2078bb`; acceptance mostly passed 2026-10-03, see `docs/roadmap.md`** (`docs/phases/sonicgrid-triage-sync.md`):
   pushes each sonicgrid-sourced report's results to sonicgrid and runs the actions its admins queue
   (contract: sonicgrid `documentation/BUGALIZER-TRIAGE-ENDPOINTS.md`). Off by default
   (`BUGALIZER_TRIAGE_SYNC_ENABLED`); per project `ingest_config.triage_credential_env`
