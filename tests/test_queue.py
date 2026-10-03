@@ -589,6 +589,10 @@ def test_release_orphaned_claims_rolls_back_each_stage():
     assert report_get(analyzing)["status"] == "triaged"
     assert report_get(fixing)["status"] == "triaged"
     assert report_get(untouched)["status"] == "submitted"
+    # Only the paid stage gets a recorded attempt here (no running rows seeded).
+    assert analyses_for_report(analyzing) == []
+    [fix_row] = analyses_for_report(fixing, phase="fix")
+    assert fix_row["status"] == "failed" and fix_row["result"]["permanent"] is True
 
 
 def test_release_orphaned_claims_leaves_settled_and_open_pr_reports_alone():
@@ -619,3 +623,37 @@ async def test_startup_releases_orphaned_claims():
 
     async with lifespan(app):
         assert report_get(analyzing)["status"] == "triaged"
+
+
+def test_release_fails_running_rows_left_by_the_dead_process():
+    from bugalizer.db import release_orphaned_claims
+    proj = _make_project()
+    rid = _claimed_report(proj["id"], "analyzing")
+    analysis_create(bug_report_id=rid, phase="localization", status="running")
+
+    release_orphaned_claims()
+
+    [row] = analyses_for_report(rid, phase="localization")
+    assert row["status"] == "failed"
+    assert row["result"]["interrupted"] is True
+    assert "permanent" not in row["result"]  # local work: retried within the cap
+    assert row["completed_at"]
+
+
+def test_repeated_interrupted_triage_exhausts_the_retry_budget():
+    """A report that kills the process every time stops being dispatched."""
+    from bugalizer.config import settings
+    from bugalizer.db import release_orphaned_claims, try_claim_report
+    settings.retry_delay_seconds = 0
+    proj = _make_project()
+    rid = _make_report(proj["id"])["id"]
+    report_update_status(rid, "triaged")
+
+    for _ in range(settings.max_triage_retries):
+        assert [r["id"] for r in triage_eligible_reports()] == [rid]
+        assert try_claim_report(rid, "triaged", "analyzing")
+        analysis_create(bug_report_id=rid, phase="triage", status="running")
+        release_orphaned_claims()
+
+    assert triage_eligible_reports() == []
+    assert len(analyses_for_report(rid, phase="triage")) == settings.max_triage_retries

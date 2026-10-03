@@ -649,3 +649,78 @@ async def test_request_key_absent_after_bad_output(tmp_path, caplog):
         await propose_fix(report["id"], llm_override=LLMOverride(api_key=SENTINEL_KEY))
     assert len(_failed_fix_rows(report["id"])) == 1
     _assert_key_nowhere(report["id"], caplog)
+
+
+# ---------------------------------------------------------------------------
+# Restart mid-fix (db.release_orphaned_claims)
+# ---------------------------------------------------------------------------
+
+async def _one_worker_cycle(monkeypatch, mock_llm: AsyncMock) -> None:
+    """Run the real queue worker for one poll cycle with auto-fix on."""
+    import asyncio
+    from bugalizer.queue import worker
+    monkeypatch.setattr(settings, "auto_fix_enabled", True)
+    monkeypatch.setattr(settings, "queue_poll_seconds", 3600)
+    with patch("bugalizer.pipeline.fix_proposer.llm_client.complete", new=mock_llm):
+        task = asyncio.create_task(worker._poll_loop())
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if mock_llm.await_count:
+                break
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+def _triaged_fix_ready_report(tmp_path) -> dict:
+    report, _ = _seed_fixture_report(tmp_path)
+    # A completed triage keeps Stage 2 out of the worker cycle.
+    analysis_create(bug_report_id=report["id"], phase="triage", status="completed",
+                    result={"summary": "s"})
+    return report
+
+
+@pytest.mark.asyncio
+async def test_worker_runs_the_fix_for_an_uninterrupted_report(tmp_path, monkeypatch):
+    """Control for the test below: the cycle does dispatch Stage 4."""
+    report = _triaged_fix_ready_report(tmp_path)
+    mock_llm = AsyncMock(return_value=_make_llm_response_for_proposal(_valid_proposal_payload()))
+    await _one_worker_cycle(monkeypatch, mock_llm)
+    assert mock_llm.await_count == 1
+    assert report_get(report["id"])["status"] == "fix_proposed"
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_paid_fix_is_never_repeated_by_the_worker(tmp_path, monkeypatch):
+    """A restart mid-fix: the call may have been billed, so auto-fix must not
+    make it again. The report is released to `triaged` with a permanent
+    interrupted failure; a person can still re-run it."""
+    report = _triaged_fix_ready_report(tmp_path)
+    assert db.try_claim_report(report["id"], "triaged", "fix_proposing")
+
+    assert db.release_orphaned_claims() == {"fix_proposing": 1}
+
+    mock_llm = AsyncMock(return_value=_make_llm_response_for_proposal(_valid_proposal_payload()))
+    await _one_worker_cycle(monkeypatch, mock_llm)
+    assert mock_llm.await_count == 0
+    assert report_get(report["id"])["status"] == "triaged"
+    [failed] = _failed_fix_rows(report["id"])
+    assert failed["result"]["interrupted"] is True
+    assert failed["result"]["permanent"] is True
+
+    # The manual path (Analyze cloud / sync action) is not gated by retry caps.
+    with patch("bugalizer.pipeline.fix_proposer.llm_client.complete", new=mock_llm):
+        outcome = await propose_fix(report["id"])
+    assert outcome.kind == "proposed"
+    assert mock_llm.await_count == 1
+
+
+def test_repeated_startup_recovery_records_one_interruption(tmp_path):
+    report, _ = _seed_fixture_report(tmp_path)
+    assert db.try_claim_report(report["id"], "triaged", "fix_proposing")
+
+    assert db.release_orphaned_claims() == {"fix_proposing": 1}
+    assert db.release_orphaned_claims() == {}
+
+    assert len(_failed_fix_rows(report["id"])) == 1
+    assert db.reports_eligible_for_fix() == []
