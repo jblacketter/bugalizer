@@ -556,3 +556,104 @@ def test_file_db_connections_are_per_thread(tmp_path):
     finally:
         settings.db_path = ":memory:"
         db.reset_conn()
+
+
+# ---------------------------------------------------------------------------
+# Orphaned stage claims (process died mid-stage)
+# ---------------------------------------------------------------------------
+
+def _claimed_report(project_id, claimed_status):
+    """A report left in `claimed_status`, as a killed process would leave it."""
+    from bugalizer import db
+    report = _make_report(project_id)
+    if claimed_status == "validating":
+        assert db.try_claim_report(report["id"], "submitted", "validating")
+    else:
+        report_update_status(report["id"], "triaged")
+        assert db.try_claim_report(report["id"], "triaged", claimed_status)
+    return report["id"]
+
+
+def test_release_orphaned_claims_rolls_back_each_stage():
+    from bugalizer.db import release_orphaned_claims
+    proj = _make_project()
+    validating = _claimed_report(proj["id"], "validating")
+    analyzing = _claimed_report(proj["id"], "analyzing")
+    fixing = _claimed_report(proj["id"], "fix_proposing")
+    untouched = _make_report(proj["id"])["id"]
+
+    released = release_orphaned_claims()
+
+    assert released == {"validating": 1, "analyzing": 1, "fix_proposing": 1}
+    assert report_get(validating)["status"] == "submitted"
+    assert report_get(analyzing)["status"] == "triaged"
+    assert report_get(fixing)["status"] == "triaged"
+    assert report_get(untouched)["status"] == "submitted"
+    # Only the paid stage gets a recorded attempt here (no running rows seeded).
+    assert analyses_for_report(analyzing) == []
+    [fix_row] = analyses_for_report(fixing, phase="fix")
+    assert fix_row["status"] == "failed" and fix_row["result"]["permanent"] is True
+
+
+def test_release_orphaned_claims_leaves_settled_and_open_pr_reports_alone():
+    from bugalizer.db import release_orphaned_claims
+    proj = _make_project()
+    ids = {}
+    for status in ("triaged", "clarification_needed", "fix_proposed", "fix_approved", "closed"):
+        rid = _make_report(proj["id"])["id"]
+        report_update_status(rid, status)
+        ids[status] = rid
+
+    assert release_orphaned_claims() == {}
+    for status, rid in ids.items():
+        assert report_get(rid)["status"] == status
+
+
+def test_release_orphaned_claims_is_a_noop_on_a_clean_db():
+    from bugalizer.db import release_orphaned_claims
+    assert release_orphaned_claims() == {}
+
+
+@pytest.mark.asyncio
+async def test_startup_releases_orphaned_claims():
+    """The app's lifespan runs the release before any loop starts."""
+    from bugalizer.main import app, lifespan
+    proj = _make_project()
+    analyzing = _claimed_report(proj["id"], "analyzing")
+
+    async with lifespan(app):
+        assert report_get(analyzing)["status"] == "triaged"
+
+
+def test_release_fails_running_rows_left_by_the_dead_process():
+    from bugalizer.db import release_orphaned_claims
+    proj = _make_project()
+    rid = _claimed_report(proj["id"], "analyzing")
+    analysis_create(bug_report_id=rid, phase="localization", status="running")
+
+    release_orphaned_claims()
+
+    [row] = analyses_for_report(rid, phase="localization")
+    assert row["status"] == "failed"
+    assert row["result"]["interrupted"] is True
+    assert "permanent" not in row["result"]  # local work: retried within the cap
+    assert row["completed_at"]
+
+
+def test_repeated_interrupted_triage_exhausts_the_retry_budget():
+    """A report that kills the process every time stops being dispatched."""
+    from bugalizer.config import settings
+    from bugalizer.db import release_orphaned_claims, try_claim_report
+    settings.retry_delay_seconds = 0
+    proj = _make_project()
+    rid = _make_report(proj["id"])["id"]
+    report_update_status(rid, "triaged")
+
+    for _ in range(settings.max_triage_retries):
+        assert [r["id"] for r in triage_eligible_reports()] == [rid]
+        assert try_claim_report(rid, "triaged", "analyzing")
+        analysis_create(bug_report_id=rid, phase="triage", status="running")
+        release_orphaned_claims()
+
+    assert triage_eligible_reports() == []
+    assert len(analyses_for_report(rid, phase="triage")) == settings.max_triage_retries

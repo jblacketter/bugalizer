@@ -810,6 +810,72 @@ def try_claim_report(
     return cursor.rowcount == 1
 
 
+# Transient stage claims and the status each one rolls back to; the same
+# rollbacks the pipeline's own failure paths perform. `fix_approved` is not
+# listed: open-pr owns its claim and adopts abandoned ones (`adopt_claim`).
+ORPHANED_CLAIM_ROLLBACK = {
+    "validating": "submitted",
+    "analyzing": "triaged",
+    "fix_proposing": "triaged",
+}
+
+
+INTERRUPTED_ERROR = "interrupted: the process stopped mid-stage"
+
+
+@retry_on_locked
+def release_orphaned_claims() -> dict[str, int]:
+    """Roll back stage claims left behind by a process that died mid-stage.
+
+    Call once at startup, before any worker or sync loop starts. Bugalizer
+    runs one process per database (docs/decision_log.md, "Single-process
+    assumption"), so nothing in the new process can hold these claims yet:
+    every report still sitting in one, and every `running` analysis row,
+    belongs to a dead process. A second server on the same database would
+    have its live claims rolled back.
+
+    The interrupted attempt is recorded before the report becomes
+    schedulable again, so retry caps count it:
+    - `running` triage/localization rows become failed rows (transient);
+    - each `fix_proposing` report gets a failed `fix` row marked permanent.
+      The paid call may already have been billed, so the worker never
+      repeats it on its own; a person re-runs it (Analyze, or
+      `/queue/{id}/retry`), as with sync's `no_auto_retry`.
+    One transaction; a second run finds nothing left to record.
+    Returns {claimed_status: count}.
+    """
+    conn = _get_conn()
+    now = _now()
+    released: dict[str, int] = {}
+    with conn:
+        conn.execute(
+            "UPDATE analyses SET status = 'failed', result = ?, completed_at = ? "
+            "WHERE status = 'running'",
+            (json.dumps({"error": INTERRUPTED_ERROR, "interrupted": True}), now),
+        )
+        fixing = conn.execute(
+            "SELECT id FROM bug_reports WHERE status = 'fix_proposing'"
+        ).fetchall()
+        fix_result = json.dumps(
+            {"error": INTERRUPTED_ERROR, "interrupted": True, "permanent": True}
+        )
+        for row in fixing:
+            conn.execute(
+                """INSERT INTO analyses
+                   (id, bug_report_id, phase, status, result, completed_at, created_at)
+                   VALUES (?, ?, 'fix', 'failed', ?, ?, ?)""",
+                (_new_id(), row["id"], fix_result, now, now),
+            )
+        for claimed, rollback in ORPHANED_CLAIM_ROLLBACK.items():
+            cursor = conn.execute(
+                "UPDATE bug_reports SET status = ?, updated_at = ? WHERE status = ?",
+                (rollback, now, claimed),
+            )
+            if cursor.rowcount:
+                released[claimed] = cursor.rowcount
+    return released
+
+
 @retry_on_locked
 def adopt_claim(report_id: str, observed_token: Optional[str], new_token: str) -> bool:
     """Take over an abandoned `fix_approved` claim (Phase 8).

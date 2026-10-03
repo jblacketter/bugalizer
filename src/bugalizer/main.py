@@ -20,7 +20,12 @@ from fastapi.staticfiles import StaticFiles
 
 from bugalizer import __version__
 from bugalizer.config import settings, unknown_env_file_settings
-from bugalizer.db import ingest_health_counts, init_db, triage_sync_health_counts
+from bugalizer.db import (
+    ingest_health_counts,
+    init_db,
+    release_orphaned_claims,
+    triage_sync_health_counts,
+)
 from bugalizer.api.reports import router as reports_router
 from bugalizer.api.projects import router as projects_router
 from bugalizer.api.queue import router as queue_router
@@ -89,6 +94,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if unknown:
         # Names only: a value could be a secret.
         logger.warning("Ignoring unknown settings in .env: %s", ", ".join(unknown))
+    released = release_orphaned_claims()
+    if released:
+        logger.warning(
+            "Released stage claims left by a previous process: %s",
+            ", ".join(f"{n} {status}" for status, n in released.items()),
+        )
     if settings.queue_enabled:
         start_worker()
     if settings.ingest_enabled:

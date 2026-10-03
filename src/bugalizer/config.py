@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     fix_max_bundle_bytes: int = 4_194_304   # 4 MiB total file-bundle cap
     fix_max_file_bytes: int = 524_288       # 512 KiB per-file cap
     fix_enable_prompt_caching: bool = True
+    fix_timeout_seconds: int = 600          # Stage 4 LLM call; a local 14b diff can exceed 120s
 
     # Open PR (Phase 8 / B2). One fine-grained GitHub token (single repo;
     # Contents + Pull requests read/write). Unset = POST /reports/{id}/open-pr

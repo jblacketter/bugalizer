@@ -132,29 +132,32 @@ def _extract_json(text: str) -> dict[str, Any]:
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```\s*$", "", text)
-    # First try whole text as JSON
+    # First try whole text as JSON. strict=False accepts raw newlines/tabs
+    # inside strings, which local models emit in the `diff` field.
     try:
-        return json.loads(text)
+        return json.loads(text, strict=False)
     except json.JSONDecodeError:
         pass
-    # Fall back: find first { ... matching }
-    start = text.find("{")
-    if start < 0:
+    # Fall back: try each "{" as the start of a JSON object. raw_decode
+    # respects string quoting, so braces inside the diff text or in prose
+    # (JSX like `{/* ... */}`) neither unbalance nor hijack the match.
+    if "{" not in text:
         raise FixProposalError(f"No JSON object found in LLM response: {text[:200]!r}")
-    depth = 0
-    for i, ch in enumerate(text[start:], start=start):
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(text[start:i + 1])
-                except json.JSONDecodeError as exc:
-                    raise FixProposalError(
-                        f"Extracted candidate JSON is malformed: {exc}"
-                    ) from exc
-    raise FixProposalError("Unbalanced JSON braces in LLM response")
+    decoder = json.JSONDecoder(strict=False)
+    first_error: Optional[json.JSONDecodeError] = None
+    start = text.find("{")
+    while start >= 0:
+        try:
+            obj, _ = decoder.raw_decode(text, start)
+        except json.JSONDecodeError as exc:
+            first_error = first_error or exc
+        else:
+            if isinstance(obj, dict):
+                return obj
+        start = text.find("{", start + 1)
+    raise FixProposalError(
+        f"Extracted candidate JSON is malformed: {first_error}"
+    ) from first_error
 
 
 def _looks_like_unified_diff(diff: str) -> bool:
@@ -415,6 +418,7 @@ async def propose_fix(
             messages=messages,
             provider=fix_provider,
             api_key=request_key,
+            timeout=settings.fix_timeout_seconds,
         )
 
         # 4. Parse + validate.
