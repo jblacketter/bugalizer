@@ -160,6 +160,18 @@ def test_extract_json_accepts_raw_newlines_in_strings():
     assert out["diff"].startswith("--- a/f\n+++ b/f")
 
 
+def test_extract_json_skips_jsx_braces_in_prose():
+    """A preamble quoting `{ /* ... */ }` must not be taken as the object."""
+    text = 'The bug is in `{ /* External Link */ }` handling.\n{"root_cause": "x", "n": 1}'
+    assert _extract_json(text) == {"root_cause": "x", "n": 1}
+
+
+def test_extract_json_ignores_braces_inside_string_values():
+    """Unbalanced braces in the diff string must not break extraction."""
+    text = 'Here you go: {"diff": "-  if (a) {\\n+  if (b) {", "k": 2}'
+    assert _extract_json(text)["k"] == 2
+
+
 def test_extract_json_raises_when_no_object():
     with pytest.raises(FixProposalError):
         _extract_json("no json here")
