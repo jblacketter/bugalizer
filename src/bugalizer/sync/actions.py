@@ -12,6 +12,12 @@ and model of every LLM stage it will run are resolved and pinned, and the
 cloud allowlist, the local-only rule for `analyze_local` and `no_auto_retry`
 are decided from those pinned values (plan §4a, D-A). The ledger writes live
 in `triage_sync`; this module computes outcomes.
+
+Phase 12 (B4, `docs/phases/per-user-cloud-keys.md` §4 and §Rollout): with
+`BUGALIZER_SONICGRID_USER_KEYS` on, a paid action's model comes only from its
+`params.llm` pin and runs only on the requester's own key (`key_mode =
+requester`); the allowlist is not consulted. With it off, an action carrying
+`params.llm` is refused, so an own-key action never runs on the env key (I1).
 """
 
 from __future__ import annotations
@@ -26,6 +32,8 @@ from bugalizer.api.reports import (
     check_local_analysis,
     check_status_transition,
 )
+from pydantic import SecretStr
+
 from bugalizer.config import settings
 from bugalizer.git_ops.pull_request import OpenPrError, open_pull_request
 from bugalizer.llm.client import resolve_fix_llm, resolve_local_llm
@@ -35,10 +43,14 @@ from bugalizer.pipeline.orchestrator import LocalOutcome, run_local_analysis
 
 logger = logging.getLogger(__name__)
 
-KINDS = ("analyze_local", "analyze_cloud", "fix_and_open_pr", "open_pr", "set_mode", "close")
+KINDS = ("analyze_local", "analyze_cloud", "fix_and_open_pr", "open_pr", "set_mode", "close", "reopen")
+PAID_KINDS = frozenset({"analyze_cloud", "fix_and_open_pr"})
 LLM_KINDS = frozenset({"analyze_local", "analyze_cloud", "fix_and_open_pr"})
 LOCAL_PROVIDERS = frozenset({"ollama"})
 MESSAGE_MAX = 2_000
+MODEL_MAX = 200
+REQUESTER = "requester"
+REQUESTER_PROVIDER = "anthropic"
 PR_STEP_MAX_ATTEMPTS = 3
 
 # Open-pr codes raised before any remote write, or with the remote left
@@ -53,6 +65,14 @@ ALLOWLIST_REFUSAL = (
     "Cloud analysis from sonicgrid is limited to allowlisted users "
     "(BUGALIZER_SONICGRID_CLOUD_USERS). Local analysis is available to every admin."
 )
+USER_KEYS_OFF_REFUSAL = "Per-user keys are not enabled on Bugalizer yet; nothing ran."
+LEGACY_REFUSAL = "Requested before per-user keys; request again."
+NO_PIN_REFUSAL = "Requested without a model pin; request again."
+REOPENED = "Report reopened in Bugalizer"
+
+
+def reopen_refusal(status: Optional[str]) -> str:
+    return f"Only a closed report can be reopened; this one is {status or 'unknown'}"
 
 
 def clip(text: Optional[str]) -> Optional[str]:
@@ -83,6 +103,7 @@ class Authorization:
     refusal: Optional[Result] = None
     pinned: dict[str, list[str]] = field(default_factory=dict)
     no_auto_retry: bool = False
+    key_mode: Optional[str] = None
 
 
 def compound_steps(fix: dict[str, Any], pr: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
@@ -95,12 +116,55 @@ def compound_steps(fix: dict[str, Any], pr: Optional[dict[str, Any]] = None) -> 
     ]
 
 
-def _refuse(kind: str, message: str) -> Result:
+def step_result(kind: str, state: str, message: str) -> Result:
+    """A one-step outcome; for `fix_and_open_pr` it is the fix step's state
+    and the PR step is skipped."""
     if kind == "fix_and_open_pr":
-        return Result("refused", message, compound_steps(
-            {"step": "fix", "state": "refused", "message": clip(message)}
+        return Result(state, message, compound_steps(
+            {"step": "fix", "state": state, "message": clip(message)}
         ))
-    return Result("refused", message)
+    return Result(state, message)
+
+
+def _refuse(kind: str, message: str) -> Result:
+    return step_result(kind, "refused", message)
+
+
+def requester_pin(params: Any) -> Optional[tuple[str, str]]:
+    """The `params.llm` pin of an own-key paid action, or None when absent
+    or invalid (fail closed: Anthropic only, a non-blank model)."""
+    llm = params.get("llm") if isinstance(params, dict) else None
+    if not isinstance(llm, dict):
+        return None
+    provider, model = llm.get("provider"), llm.get("model")
+    if provider != REQUESTER_PROVIDER:
+        return None
+    if not isinstance(model, str) or not model.strip() or len(model) > MODEL_MAX:
+        return None
+    return provider, model
+
+
+def _authorize_requester(project: dict[str, Any], report: dict[str, Any],
+                         action: dict[str, Any], params: dict[str, Any]) -> Authorization:
+    """Gate on: the pin comes only from `params.llm`; the key is fetched at
+    dispatch (triage_sync). Every paid action is `no_auto_retry`."""
+    kind = action["kind"]
+    consents = action.get("consents") or {}
+    if "llm" not in params:
+        return Authorization(_refuse(kind, LEGACY_REFUSAL))
+    pin = requester_pin(params)
+    if pin is None:
+        return Authorization(_refuse(kind, NO_PIN_REFUSAL))
+    pinned = {"fix": list(pin)}
+    if kind == "fix_and_open_pr":
+        if consents.get("repoWrite") is not True:
+            return Authorization(_refuse(kind, "The repo-write consent was not given."), pinned)
+        if consents.get("cloudSpend") is not True:
+            return Authorization(_refuse(kind, "The cloud-spend consent was not given."), pinned)
+    refusal = check_cloud_analysis(report, project)
+    if refusal is not None:
+        return Authorization(_refuse(kind, refusal[1]), pinned)
+    return Authorization(None, pinned, no_auto_retry=True, key_mode=REQUESTER)
 
 
 def authorize(project: dict[str, Any], report: dict[str, Any], action: dict[str, Any]) -> Authorization:
@@ -128,7 +192,13 @@ def authorize(project: dict[str, Any], report: dict[str, Any], action: dict[str,
             return Authorization(_refuse(kind, refusal[1]), pinned)
         return Authorization(None, pinned, no_auto_retry=False)
 
-    if kind in ("analyze_cloud", "fix_and_open_pr"):
+    if kind in PAID_KINDS:
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        if settings.sonicgrid_user_keys:
+            return _authorize_requester(project, report, action, params)
+        if "llm" in params:
+            # An own-key action never runs on the legacy path (env key).
+            return Authorization(_refuse(kind, USER_KEYS_OFF_REFUSAL))
         fix = list(resolve_fix_llm(project))
         pinned = {"fix": fix}
         paid = is_paid(fix[0])
@@ -157,6 +227,11 @@ def authorize(project: dict[str, Any], report: dict[str, Any], action: dict[str,
         mode = (action.get("params") or {}).get("mode")
         if mode not in {m.value for m in AnalysisMode}:
             return Authorization(_refuse(kind, "params.mode must be auto, local_only or hold"))
+        return Authorization(None)
+
+    if kind == "reopen":
+        if report["status"] != BugStatus.CLOSED.value:
+            return Authorization(_refuse(kind, reopen_refusal(report["status"])))
         return Authorization(None)
 
     # close
@@ -219,10 +294,25 @@ def map_fix(kind: str, outcome: Any) -> Result:
     return Result(state, message)
 
 
-async def run_llm(row: dict[str, Any]) -> Result:
+async def run_llm(row: dict[str, Any], api_key: Optional[str] = None) -> Result:
     """Dispatch the LLM part of an action with its pinned configuration and
-    tag every stage row with the action id."""
+    tag every stage row with the action id. `api_key` is the requester's key
+    for a `key_mode=requester` action (released once by sonicgrid); it lives
+    only in this call."""
     kind, report_id, action_id = row["kind"], row["report_id"], row["action_id"]
+    if row.get("key_mode") == REQUESTER:
+        pin = _pin(row, "fix")
+        if pin is None or pin[0] != REQUESTER_PROVIDER or not api_key:
+            return step_result(kind, "failed", "invalid credential response")
+        override = LLMOverride(
+            provider=pin[0], model=pin[1], api_key=SecretStr(api_key),
+            key_ref=attribution_ref(row),
+        )
+        outcome = await propose_fix(
+            report_id, llm_override=override, trigger_ref=action_id,
+            require_request_key=True,
+        )
+        return map_fix(kind, outcome)
     if kind == "analyze_local":
         outcome = await run_local_analysis(
             report_id,
@@ -232,6 +322,10 @@ async def run_llm(row: dict[str, Any]) -> Result:
         )
         return map_local(outcome)
     pin = _pin(row, "fix")
+    if settings.sonicgrid_user_keys and (pin is None or is_paid(pin[0])):
+        # Gate on: an action authorized under the old rules never reaches a
+        # paid model on the env key (I1).
+        return _refuse(kind, LEGACY_REFUSAL)
     override = LLMOverride(provider=pin[0], model=pin[1]) if pin else None
     outcome = await propose_fix(
         report_id, llm_override=override,

@@ -157,7 +157,7 @@ async def _triage_counts(db_ok: bool) -> dict[str, Optional[int]]:
             return await asyncio.to_thread(triage_sync_health_counts)
         except Exception:  # pragma: no cover - defensive
             pass
-    return {"projects": None, "failing": None}
+    return {"projects": None, "failing": None, "paid_in_flight": None, "pr_check_errors": None}
 
 
 async def _validation_error_without_input(
@@ -259,7 +259,10 @@ def create_app() -> FastAPI:
             # Phase 11: the same shape for the sonicgrid triage sync; details
             # at GET /projects/{id}/triage-sync. Never changes `status`.
             "triage_sync": {
-                "enabled": settings.triage_sync_enabled, **await _triage_counts(db_ok)
+                "enabled": settings.triage_sync_enabled,
+                # Phase 12: per-user keys gate (B4 activation reads this).
+                "user_keys": settings.sonicgrid_user_keys,
+                **await _triage_counts(db_ok),
             },
             "checks": {
                 "database": db_ok,

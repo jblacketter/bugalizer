@@ -53,3 +53,29 @@ $P = "<sonicgrid project id>"
    never left claimed past the 45-minute bound.
 
 Record each step's outcome (token redacted).
+
+## Phase 12 (B4): lanes, PR fate, reopen, per-user keys
+
+Prerequisites: B4 deployed on BOWIE; sonicgrid S3a and S4 (board) live; S3b
+(AI settings + credential endpoint) live for steps 13-15; B2's GitHub token
+set for steps 10-12. Setup and the activation sequence:
+[`deploy-windows.md` §7e](deploy-windows.md#7e-board-lanes-pr-fate-and-per-user-keys-phase-12).
+
+9. **Lanes.** Within one tick of the upgrade every bug sits in a board lane
+   that matches its Bugalizer status (`/health` `triage_sync.failing: 0`).
+10. **Merged PR completes.** Merge a Bugalizer fix PR on GitHub. Within 5
+    minutes plus one tick the card moves to Completed (`merged`) and the
+    sonicgrid bug is resolved, with nobody touching the board.
+11. **Closed PR returns.** Close another fix PR without merging. The card
+    returns to Triaged (`pr_closed`) and the bug is active.
+12. **Reopen.** Reopen the merged bug from step 10. It returns to Triaged and
+    active, and stays there on later ticks (not re-closed). Reopen is not
+    offered on a rejected or duplicate bug.
+13. **Activate per-user keys** (§7e sequence). Record the stopped-process
+    check from step 2 of that sequence.
+14. **Own key.** Jack saves his key in AI settings and queues Analyze (cloud).
+    Done; `Invoke-RestMethod "$B/usage" -Headers $h` shows the run under
+    `key_source: request`, `key_ref: sonicgrid:<Jack's user id>`, and the
+    Anthropic console shows the call on Jack's key, none on BOWIE's.
+15. **No key.** An admin without a saved key cannot queue a paid action
+    (refused in sonicgrid: "Add your Claude API key in AI settings").

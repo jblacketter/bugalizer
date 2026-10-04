@@ -325,6 +325,9 @@ class _GitHub:
             raise self._fail("GET", path, resp)
         return list(resp.json())
 
+    async def get_pr(self, number: int) -> httpx.Response:
+        return await self._request("GET", f"/repos/{self.owner}/{self.repo}/pulls/{number}")
+
     async def create_pr(self, *, title: str, body: str, head: str, base: str) -> dict[str, Any]:
         path = f"/repos/{self.owner}/{self.repo}/pulls"
         resp = await self._request(
@@ -336,6 +339,55 @@ class _GitHub:
         if resp.status_code != 201:
             raise self._fail("POST", path, resp)
         return resp.json()
+
+
+# ---------------------------------------------------------------------------
+# PR state (Phase 12 / B4)
+# ---------------------------------------------------------------------------
+
+class PrReadError(Exception):
+    """A PR read that established nothing. `code` is from a fixed
+    vocabulary (it is stored and counted, never the response text)."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+async def read_pr_state(project: dict[str, Any], pr_number: int) -> str:
+    """The PR's fate on GitHub: `open`, `merged` or `closed` (unmerged).
+    Read-only; uses the Phase 8 token. Raises PrReadError otherwise."""
+    token = settings.github_token_value()
+    if token is None:
+        raise PrReadError("github_not_configured")
+    slug = parse_github_slug(project.get("repo_url", ""))
+    if slug is None:
+        raise PrReadError("not_github")
+    try:
+        resp = await _GitHub(token, slug[0], slug[1]).get_pr(pr_number)
+    except _GitHubError:
+        raise PrReadError("network_error") from None
+    if resp.status_code == 200:
+        try:
+            body = resp.json()
+        except ValueError:
+            raise PrReadError("malformed_response") from None
+        if not isinstance(body, dict):
+            raise PrReadError("malformed_response")
+        if body.get("merged") is True or body.get("merged_at"):
+            return "merged"
+        if body.get("state") in ("open", "closed"):
+            return body["state"]
+        raise PrReadError("malformed_response")
+    if resp.status_code == 429 or (
+        resp.status_code == 403 and resp.headers.get("x-ratelimit-remaining") == "0"
+    ):
+        raise PrReadError("rate_limited")
+    if resp.status_code in (401, 403):
+        raise PrReadError("unauthorized")
+    if resp.status_code == 404:
+        raise PrReadError("not_found")
+    raise PrReadError(f"http_{resp.status_code}")
 
 
 # ---------------------------------------------------------------------------

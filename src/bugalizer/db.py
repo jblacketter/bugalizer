@@ -212,6 +212,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.commit()
         logger.info("Migration: added fix_proposals.trigger_ref column")
 
+    # Phase 12 (B4): the fix PR's fate on GitHub, and how a triage action's
+    # key was authorized (`requester` = the requester's own key; null = the
+    # Phase 11 rules). All nullable.
+    fp_columns = {row[1] for row in conn.execute("PRAGMA table_info(fix_proposals)").fetchall()}
+    for column in ("pr_state", "pr_checked_at", "pr_settled_at", "pr_check_error"):
+        if fp_columns and column not in fp_columns:
+            conn.execute(f"ALTER TABLE fix_proposals ADD COLUMN {column} TEXT")
+            conn.commit()
+            logger.info("Migration: added fix_proposals.%s column", column)
+    ta_columns = {row[1] for row in conn.execute("PRAGMA table_info(triage_actions)").fetchall()}
+    if ta_columns and "key_mode" not in ta_columns:
+        conn.execute("ALTER TABLE triage_actions ADD COLUMN key_mode TEXT")
+        conn.commit()
+        logger.info("Migration: added triage_actions.key_mode column")
+
     br_columns = {row[1] for row in conn.execute("PRAGMA table_info(bug_reports)").fetchall()}
     if {"project_id", "external_id"} <= br_columns:
         # The idempotency key for imports (ingest_commit's ON CONFLICT target).
@@ -339,6 +354,10 @@ CREATE TABLE IF NOT EXISTS fix_proposals (
     pushed_sha TEXT,
     pr_opened_at TEXT,
     trigger_ref TEXT,
+    pr_state TEXT,
+    pr_checked_at TEXT,
+    pr_settled_at TEXT,
+    pr_check_error TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -417,7 +436,8 @@ CREATE TABLE IF NOT EXISTS triage_actions (
     attempts INTEGER NOT NULL DEFAULT 0,
     terminal_acked INTEGER NOT NULL DEFAULT 0,
     terminal_error TEXT,
-    late_outcome TEXT
+    late_outcome TEXT,
+    key_mode TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_triage_actions_project ON triage_actions(project_id, phase);
@@ -1390,6 +1410,100 @@ def record_pull_request(
         raise
 
 
+# ---------------------------------------------------------------------------
+# PR state (Phase 12 / B4, plan §2)
+# ---------------------------------------------------------------------------
+
+def prs_to_check(project_id: str, checked_before: str) -> list[dict[str, Any]]:
+    """Unsettled recorded PRs of a project whose report is `fix_committed`
+    and that were not read since `checked_before`."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """SELECT fp.* FROM fix_proposals fp
+           JOIN bug_reports br ON br.id = fp.bug_report_id
+           WHERE br.project_id = ? AND br.status = 'fix_committed'
+             AND fp.pr_number IS NOT NULL AND fp.pr_settled_at IS NULL
+             AND (fp.pr_checked_at IS NULL OR fp.pr_checked_at < ?)
+           ORDER BY fp.pr_checked_at IS NOT NULL, fp.pr_checked_at""",
+        (project_id, checked_before),
+    ).fetchall()
+    return [_fix_proposal_row_to_dict(r) for r in rows]
+
+
+@retry_on_locked
+def pr_check_record(
+    proposal_id: str, *, state: Optional[str] = None, error: Optional[str] = None
+) -> None:
+    """Record one non-terminal read: the PR is `open`, or the read failed
+    (`error`, state unchanged). Never touches `updated_at`."""
+    conn = _get_conn()
+    if state is not None:
+        conn.execute(
+            "UPDATE fix_proposals SET pr_state = ?, pr_checked_at = ?, pr_check_error = NULL "
+            "WHERE id = ?",
+            (state, _now(), proposal_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE fix_proposals SET pr_checked_at = ?, pr_check_error = ? WHERE id = ?",
+            (_now(), error, proposal_id),
+        )
+    conn.commit()
+
+
+@retry_on_locked
+def pr_settle(proposal_id: str, bug_report_id: str, pr_number: int, state: str) -> bool:
+    """Apply a terminal PR state in one transaction: `merged` closes the
+    report (`resolution_reason='pr_merged:<n>'`), `closed` returns it to
+    `triaged`; both only from `fix_committed` (a CAS). The proposal's
+    `pr_state` and `pr_settled_at` are recorded whether or not the CAS
+    matched, so the PR is never read again. True when the status moved."""
+    if state not in ("merged", "closed"):
+        raise ValueError(f"not a terminal PR state: {state}")
+    conn = _get_conn()
+    now = _now()
+    if conn.in_transaction:
+        conn.commit()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if state == "merged":
+            cur = conn.execute(
+                """UPDATE bug_reports SET status = 'closed', resolution_reason = ?, updated_at = ?
+                   WHERE id = ? AND status = 'fix_committed'""",
+                (f"pr_merged:{pr_number}", now, bug_report_id),
+            )
+        else:
+            cur = conn.execute(
+                """UPDATE bug_reports SET status = 'triaged', updated_at = ?
+                   WHERE id = ? AND status = 'fix_committed'""",
+                (now, bug_report_id),
+            )
+        moved = cur.rowcount == 1
+        conn.execute(
+            """UPDATE fix_proposals SET pr_state = ?, pr_checked_at = ?, pr_settled_at = ?,
+                   pr_check_error = NULL, updated_at = ?
+               WHERE id = ? AND bug_report_id = ?""",
+            (state, now, now, now, proposal_id, bug_report_id),
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return moved
+
+
+def pr_check_error_count(project_id: Optional[str] = None) -> int:
+    """Unsettled PRs whose last read failed (404/401/rate limit...)."""
+    conn = _get_conn()
+    query = ("SELECT COUNT(*) FROM fix_proposals fp JOIN bug_reports br ON br.id = fp.bug_report_id "
+             "WHERE fp.pr_settled_at IS NULL AND fp.pr_check_error IS NOT NULL")
+    params: list[Any] = []
+    if project_id is not None:
+        query += " AND br.project_id = ?"
+        params.append(project_id)
+    return conn.execute(query, params).fetchone()[0]
+
+
 def fix_analysis_for_proposal(proposal: dict[str, Any]) -> Optional[dict[str, Any]]:
     """The completed Stage 4 analysis that produced a proposal: the newest
     completed `fix` row created no later than the proposal (the stage writes
@@ -1987,7 +2101,7 @@ def triage_action_delete_reserved(action_id: str) -> None:
 _TRIAGE_ACTION_FIELDS = frozenset({
     "phase", "no_auto_retry", "pinned_llm", "intent_at", "dispatched_at",
     "fix_proposal_id", "pr_url", "attempts", "steps", "terminal_acked",
-    "terminal_error", "late_outcome",
+    "terminal_error", "late_outcome", "key_mode",
 })
 
 
@@ -2043,6 +2157,46 @@ def triage_action_finish(
     )
     conn.commit()
     return cur.rowcount == 1
+
+
+@retry_on_locked
+def reopen_for_action(report_id: str, action_id: str, message: str) -> str:
+    """A `reopen` action, atomic with its outcome (plan §3): in ONE
+    transaction, `closed -> triaged` with `resolution_reason` cleared and,
+    only if that matched, the ledger finish (`done`) from `dispatched`.
+
+    Returns `done` (both written), `not_closed` (the report is in another
+    status; nothing written, the caller refuses), or `ledger_moved` (the
+    ledger row was no longer `dispatched`, e.g. timed out; everything is
+    rolled back)."""
+    conn = _get_conn()
+    now = _now()
+    if conn.in_transaction:
+        conn.commit()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            """UPDATE bug_reports SET status = 'triaged', resolution_reason = NULL, updated_at = ?
+               WHERE id = ? AND status = 'closed'""",
+            (now, report_id),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return "not_closed"
+        cur = conn.execute(
+            """UPDATE triage_actions
+               SET phase = 'finished', outcome = 'done', message = ?, steps = NULL, finished_at = ?
+               WHERE action_id = ? AND phase = 'dispatched'""",
+            (message, now, action_id),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return "ledger_moved"
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return "done"
 
 
 def triage_actions_unacked(project_id: str) -> list[dict[str, Any]]:
@@ -2184,4 +2338,17 @@ def triage_sync_health_counts() -> dict[str, int]:
             "AND last_error IS NOT NULL",
             ids,
         ).fetchone()[0]
-    return {"projects": len(ids), "failing": failing}
+    paid_in_flight = 0
+    if ids:
+        # B4 activation: paid actions held or dispatched (quiesce before the
+        # gate flips). Counts only, no ids.
+        paid_in_flight = conn.execute(
+            f"SELECT COUNT(*) FROM triage_actions WHERE project_id IN ({placeholders}) "
+            "AND kind IN ('analyze_cloud', 'fix_and_open_pr') "
+            "AND phase IN ('reserved', 'intent', 'dispatched', 'fix_done')",
+            ids,
+        ).fetchone()[0]
+    return {
+        "projects": len(ids), "failing": failing,
+        "paid_in_flight": paid_in_flight, "pr_check_errors": pr_check_error_count(),
+    }

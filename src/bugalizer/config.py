@@ -126,6 +126,13 @@ class Settings(BaseSettings):
     # Sonicgrid emails allowed cloud-tier actions (E4), comma-separated. Empty
     # = nobody; everyone may still run local models.
     sonicgrid_cloud_users: str = ""
+    # Per-user Claude keys (Phase 12 / B4). On: sonicgrid paid actions run
+    # only on the requester's own key, fetched once per action from
+    # sonicgrid's credential endpoint, with the model pinned in
+    # `params.llm`; the allowlist above is not consulted. Off: legacy paid
+    # actions keep the allowlist + env key, and any action carrying
+    # `params.llm` is refused (never run on the env key).
+    sonicgrid_user_keys: bool = False
 
     # `.env` in the working directory is read on startup (§5.5 native-service
     # deploys); real environment variables always take precedence over it.
