@@ -1600,3 +1600,31 @@ def test_reopen_rolls_back_when_the_ledger_has_moved():
     report = db.report_get(r["id"])
     assert (report["status"], report["resolution_reason"]) == ("closed", "pr_merged:7")
     assert ledger("a-1")["outcome"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_pr_checks_run_while_sonicgrid_is_in_backoff(fake, stages, monkeypatch):
+    from pydantic import SecretStr
+    monkeypatch.setattr(settings, "github_token", SecretStr("ghp-PLANTED"))
+    reads: list[int] = []
+
+    async def merged(project, number):
+        reads.append(number)
+        return "merged"
+    monkeypatch.setattr(ts, "read_pr_state", merged)
+    pid = make_project()
+    r = make_report(pid, bug(1), fake, status="fix_committed")
+    p = db.fix_proposal_create(bug_report_id=r["id"], analysis_id=None, root_cause="rc",
+                               explanation="ex", diff="d", confidence=0.5, files_changed=["x"])
+    conn = db._get_conn()
+    conn.execute("UPDATE fix_proposals SET pr_url = 'https://github.com/o/r/pull/9', pr_number = 9, "
+                 "branch_name = 'fix/b' WHERE id = ?", (p["id"],))
+    conn.commit()
+    ts._skip[pid] = 4  # sonicgrid is backing off
+    await ts.run_tick()
+    report = db.report_get(r["id"])
+    assert (report["status"], report["resolution_reason"]) == ("closed", "pr_merged:9")
+    assert fake.requests == []  # the sonicgrid exchange stayed skipped
+    assert ts._skip[pid] == 3
+    await ts.run_tick()
+    assert reads == [9]  # settled: not read again on later ticks

@@ -775,6 +775,21 @@ async def _check_prs(project: dict[str, Any]) -> None:
                     "moved" if moved else "status left alone")
 
 
+async def check_prs_only(project_id: str) -> None:
+    """The PR step alone, for a project whose sonicgrid exchange is in
+    backoff: GitHub is not sonicgrid, so a sonicgrid outage must not delay
+    merge detection. Same project lock as a tick; if a tick holds it, that
+    tick runs the step itself. The per-PR interval is durable, so this never
+    reads a PR more often than an ordinary tick would."""
+    lock = _project_lock(project_id)
+    if lock.locked():
+        return
+    async with lock:
+        project = db.project_get(project_id)
+        if project:
+            await _check_prs(project)
+
+
 # ---------------------------------------------------------------------------
 # Tick
 # ---------------------------------------------------------------------------
@@ -859,6 +874,10 @@ async def run_tick() -> None:
         remaining = _skip.get(pid, 0)
         if remaining > 0:
             _skip[pid] = remaining - 1
+            try:
+                await check_prs_only(pid)  # sonicgrid backs off, GitHub reads do not
+            except Exception as exc:
+                logger.error("triage project=%s PR check failed (%s)", pid, type(exc).__name__)
             continue
         try:
             outcome = await sync_project(pid)
