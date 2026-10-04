@@ -363,7 +363,8 @@ Operate:
   report ids whose last push was rejected, `terminal_errors`.
 - `POST /api/v1/projects/{id}/triage-sync/run` — one tick now (`409
   tick_in_progress` if one is running).
-- `/health` shows only `triage_sync: {enabled, projects, failing}`.
+- `/health` shows only `triage_sync: {enabled, user_keys, projects, failing,
+  paid_in_flight, pr_check_errors}` (counts, no ids).
 
 `last_error` values: `unauthorized` (token mismatch; the poll token is not
 accepted here), `source_not_configured` (no `BUGALIZER_TRIAGE_TOKEN` in Vercel
@@ -373,6 +374,59 @@ production), `credential_missing`, `duplicate_triage_source`,
 off up to 32 ticks.
 
 Acceptance walk: [`docs/sonicgrid-triage-acceptance.md`](sonicgrid-triage-acceptance.md).
+
+## 7e. Board lanes, PR fate and per-user keys (Phase 12)
+
+Plan: [`docs/phases/per-user-cloud-keys.md`](phases/per-user-cloud-keys.md).
+
+- **Lanes.** Every pushed result also carries `stage` (submitted, triage,
+  triaged, fix, review, completed), `stageDetail` and `prState`. Sonicgrid's
+  bug status follows `stage` when a push is applied. The first tick after the
+  upgrade re-pushes every report once (`BUGALIZER_TRIAGE_PUSH_PER_TICK` per
+  tick).
+- **PR fate.** With `BUGALIZER_GITHUB_TOKEN` set, each tick reads every
+  recorded, unsettled PR whose report is `fix_committed`, at most once per 5
+  minutes. Merged: the report is closed (`resolution_reason=pr_merged:<n>`)
+  and the bug goes to Completed. Closed unmerged: back to `triaged`
+  (`pr_closed`). A failed read (404, 401, rate limit) changes nothing and
+  counts in `/health` `pr_check_errors`. A settled PR is never read again, so
+  a reopened bug is not re-closed.
+- **Reopen.** A sonicgrid admin can reopen a `closed` bug (to `triaged`);
+  `rejected` and `duplicate` stay closed.
+- **Per-user keys** (`BUGALIZER_SONICGRID_USER_KEYS`, off by default). On:
+  Analyze (cloud) and Fix and open PR run only on the requester's own Claude
+  key, which Bugalizer fetches once per action from sonicgrid
+  (`POST /api/bugalizer/actions/{id}/credential`) and holds in memory for that
+  call; the model is the one the admin pinned when queueing. A lost or refused
+  release fails or refuses the action; it is never retried and never falls
+  back to this box's key. Usage shows `key_source=request`,
+  `key_ref=sonicgrid:<userId>`. Off: an action carrying a pin is refused
+  ("not enabled on Bugalizer yet"); legacy actions keep the allowlist rules.
+
+Activation sequence (one session; needs sonicgrid S3b live):
+
+1. In Vercel, set `BUGALIZER_USER_KEYS_ENABLED=paused` and redeploy: the cloud
+   buttons are hidden and the server refuses new paid actions.
+2. Quiesce BOWIE: wait until `/health` shows `triage_sync.paid_in_flight: 0`
+   (or 45 minutes have passed since the last one was queued), then stop the
+   service and **confirm the process has exited**:
+
+   ```powershell
+   Stop-Service lan-mgr-bugalizer
+   (Get-Service lan-mgr-bugalizer).Status          # must be Stopped
+   Get-NetTCPConnection -LocalPort 8090 -State Listen -ErrorAction SilentlyContinue  # must print nothing
+   ```
+
+   A timed-out action alone does not prove its task stopped; the stopped
+   process does.
+3. In `.env`: `BUGALIZER_SONICGRID_USER_KEYS=true`, delete the
+   `BUGALIZER_SONICGRID_CLOUD_USERS` line. Start the service; `/health` shows
+   `triage_sync.user_keys: true`.
+4. In Vercel, set `BUGALIZER_USER_KEYS_ENABLED=true` and redeploy.
+
+Any paid action left over from before step 3 is refused ("requested before
+per-user keys; request again"), or, if it had dispatched, reported as
+unconfirmed. None runs on this box's key.
 
 ## 8. Backups
 

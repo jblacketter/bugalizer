@@ -210,6 +210,7 @@ class FakeGitHub:
         self.posted: list[dict[str, Any]] = []
         self.fail_post: Optional[tuple[int, dict]] = None
         self.hide_lookup_once = False
+        self.fail_get: Optional[tuple[int, dict[str, str]]] = None   # (status, headers), once
 
     def _tip(self, branch: str) -> Optional[str]:
         out = git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", cwd=self.bare, check=False)
@@ -245,6 +246,9 @@ class FakeGitHub:
     def merge(self, pr: dict[str, Any]) -> None:
         pr["state"], pr["merged"] = "closed", True
 
+    def close_unmerged(self, pr: dict[str, Any]) -> None:
+        pr["state"], pr["merged"] = "closed", False
+
     def _public(self, pr: dict[str, Any]) -> dict[str, Any]:
         tip = self._tip(pr["head"]["ref"]) or pr["head"]["sha"]
         return {**{k: v for k, v in pr.items() if k != "commits"},
@@ -277,6 +281,16 @@ class FakeGitHub:
             pr = self.add_pr(body["head"], base=body["base"])
             pr.update(title=body["title"], body=body["body"], draft=body.get("draft"))
             return httpx.Response(201, json=self._public(pr))
+        single = re.fullmatch(rf"/repos/{OWNER}/{REPO}/pulls/(\d+)", path)
+        if single and request.method == "GET":
+            if self.fail_get is not None:
+                status, headers = self.fail_get
+                self.fail_get = None
+                return httpx.Response(status, json={"message": "nope"}, headers=headers)
+            pr = next((p for p in self.prs if p["number"] == int(single.group(1))), None)
+            if pr is None:
+                return httpx.Response(404, json={"message": "Not Found"})
+            return httpx.Response(200, json=self._public(pr))
         match = re.fullmatch(rf"/repos/{OWNER}/{REPO}/pulls/(\d+)/commits", path)
         if match and request.method == "GET":
             pr = next(p for p in self.prs if p["number"] == int(match.group(1)))
@@ -1208,3 +1222,159 @@ def test_migration_adds_phase8_columns():
     proposals = {r[1] for r in conn.execute("PRAGMA table_info(fix_proposals)")}
     assert "claim_token" in reports
     assert {"pr_url", "pr_number", "pushed_sha", "pr_opened_at"} <= proposals
+
+
+# ---------------------------------------------------------------------------
+# Phase 12 (B4): the PR's fate on GitHub (plan §2)
+# ---------------------------------------------------------------------------
+
+def _lane(report_id: str) -> tuple[Any, Any, Any]:
+    from bugalizer.sync.results import build_payload
+    report = db.report_get(report_id)
+    public = build_payload(report, db.analyses_for_report(report_id),
+                           db.fix_proposals_for_report(report_id),
+                           db.project_get(report["project_id"]))["public"]
+    return public["stage"], public["stageDetail"], public["prState"]
+
+
+@pytest.fixture
+def pr_check(h, monkeypatch):
+    """Run the triage sync's PR step for the harness project, every call."""
+    from bugalizer.sync import triage_sync as ts
+    monkeypatch.setattr(ts, "PR_CHECK_SECONDS", -1)
+
+    def run() -> None:
+        asyncio.run(ts._check_prs(db.project_get(h.project_id)))
+    return run
+
+
+def _opened(h) -> tuple[str, str, dict[str, Any]]:
+    report_id, (proposal_id,) = h.report()
+    assert h.open_pr(report_id).status_code == 201
+    assert db.report_get(report_id)["status"] == "fix_committed"
+    return report_id, proposal_id, h.github.prs[0]
+
+
+def test_open_pr_then_merge_completes_the_report(h, pr_check):
+    report_id, proposal_id, pr = _opened(h)
+    assert _lane(report_id) == ("review", "pr_open", None)
+    pr_check()
+    assert _lane(report_id) == ("review", "pr_open", "open")
+    h.github.merge(pr)
+    pr_check()
+    report = db.report_get(report_id)
+    assert (report["status"], report["resolution_reason"]) == ("closed", f"pr_merged:{pr['number']}")
+    proposal = db.fix_proposal_of_report(report_id, proposal_id)
+    assert proposal["pr_state"] == "merged" and proposal["pr_settled_at"]
+    assert _lane(report_id) == ("completed", "merged", "merged")
+    reads = sum(1 for m, p in h.github.calls if m == "GET" and p.endswith(f"/pulls/{pr['number']}"))
+    pr_check()  # settled: never read again
+    assert sum(1 for m, p in h.github.calls
+               if m == "GET" and p.endswith(f"/pulls/{pr['number']}")) == reads
+
+
+def test_closed_unmerged_returns_the_report_to_triaged(h, pr_check):
+    report_id, proposal_id, pr = _opened(h)
+    h.github.close_unmerged(pr)
+    pr_check()
+    assert db.report_get(report_id)["status"] == "triaged"
+    assert _lane(report_id) == ("triaged", "pr_closed", "closed")
+
+
+def test_a_manual_status_change_wins_over_the_cas(h, pr_check):
+    report_id, proposal_id, pr = _opened(h)
+    db.report_update_status(report_id, "closed", "wontfix")
+    h.github.merge(pr)
+    pr_check()
+    proposal = db.fix_proposal_of_report(report_id, proposal_id)
+    assert proposal["pr_state"] is None  # not polled: the report is no longer fix_committed
+    db.report_update_status(report_id, "fix_committed")
+    conn = db._get_conn()
+    conn.execute("UPDATE bug_reports SET status = 'triaged' WHERE id = ?", (report_id,))
+    conn.commit()
+    # Selected while fix_committed, changed before the write: state recorded, status kept.
+    assert db.pr_settle(proposal_id, report_id, pr["number"], "merged") is False
+    assert db.report_get(report_id)["status"] == "triaged"
+    assert db.fix_proposal_of_report(report_id, proposal_id)["pr_settled_at"]
+
+
+def test_a_restart_between_read_and_write_rereads_and_moves_once(h, pr_check, monkeypatch):
+    from bugalizer.sync import triage_sync as ts
+    report_id, proposal_id, pr = _opened(h)
+    h.github.merge(pr)
+    real = db.pr_settle
+
+    def crash(*args, **kwargs):
+        raise RuntimeError("process died")
+    monkeypatch.setattr(db, "pr_settle", crash)
+    with pytest.raises(RuntimeError):
+        asyncio.run(ts._check_prs(db.project_get(h.project_id)))
+    assert db.report_get(report_id)["status"] == "fix_committed"
+    monkeypatch.setattr(db, "pr_settle", real)
+    pr_check()
+    pr_check()
+    assert db.report_get(report_id)["status"] == "closed"
+    assert real(proposal_id, report_id, pr["number"], "merged") is False  # a repeat is harmless
+
+
+def test_reopen_after_merge_is_never_closed_again(h, pr_check):
+    report_id, proposal_id, pr = _opened(h)
+    h.github.merge(pr)
+    pr_check()
+    conn = db._get_conn()
+    conn.execute("UPDATE bug_reports SET status = 'fix_committed' WHERE id = ?", (report_id,))
+    conn.commit()  # even back in fix_committed, a settled PR is not polled
+    pr_check()
+    assert db.report_get(report_id)["status"] == "fix_committed"
+
+
+@pytest.mark.parametrize("status, headers, code", [
+    (404, {}, "not_found"),
+    (401, {}, "unauthorized"),
+    (403, {"x-ratelimit-remaining": "0"}, "rate_limited"),
+    (429, {}, "rate_limited"),
+])
+def test_read_failures_change_nothing_and_are_counted(h, pr_check, status, headers, code):
+    report_id, proposal_id, pr = _opened(h)
+    h.github.merge(pr)
+    h.github.fail_get = (status, headers)
+    pr_check()
+    proposal = db.fix_proposal_of_report(report_id, proposal_id)
+    assert db.report_get(report_id)["status"] == "fix_committed"
+    assert (proposal["pr_state"], proposal["pr_settled_at"]) == (None, None)
+    assert proposal["pr_check_error"] == code and proposal["pr_checked_at"]
+    assert db.pr_check_error_count() == 1
+    assert db.triage_sync_health_counts()["pr_check_errors"] == 1
+    pr_check()  # the next read succeeds
+    assert db.report_get(report_id)["status"] == "closed"
+    assert db.pr_check_error_count() == 0
+
+
+def test_reads_wait_out_the_interval(h, monkeypatch):
+    from bugalizer.sync import triage_sync as ts
+    report_id, proposal_id, pr = _opened(h)
+    asyncio.run(ts._check_prs(db.project_get(h.project_id)))
+    h.github.merge(pr)
+    asyncio.run(ts._check_prs(db.project_get(h.project_id)))  # within 5 minutes: not read
+    assert db.report_get(report_id)["status"] == "fix_committed"
+
+
+def test_no_polling_without_the_token(h, pr_check, monkeypatch):
+    report_id, proposal_id, pr = _opened(h)
+    h.github.merge(pr)
+    monkeypatch.setattr(settings, "github_token", None)
+    before = len(h.github.calls)
+    pr_check()
+    assert len(h.github.calls) == before
+    assert db.report_get(report_id)["status"] == "fix_committed"
+
+
+def test_migration_adds_phase12_columns():
+    conn = sqlite3.connect(":memory:")
+    for table in ("projects", "bug_reports", "fix_proposals", "triage_actions"):
+        conn.execute(f"CREATE TABLE {table} (id TEXT PRIMARY KEY)")
+    db._migrate(conn)
+    proposals = {r[1] for r in conn.execute("PRAGMA table_info(fix_proposals)")}
+    actions = {r[1] for r in conn.execute("PRAGMA table_info(triage_actions)")}
+    assert {"pr_state", "pr_checked_at", "pr_settled_at", "pr_check_error"} <= proposals
+    assert "key_mode" in actions

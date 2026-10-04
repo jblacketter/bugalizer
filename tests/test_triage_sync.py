@@ -56,6 +56,10 @@ LEGAL_STEPS = {
     ("failed", "skipped"): "failed", ("refused", "skipped"): "refused",
 }
 PUBLIC_KEYS = {"pipelineStatus", "summary", "severity", "prUrl"}
+PUBLIC_OPTIONAL = {"stage", "stageDetail", "prState"}   # B4 (S3a contract)
+LANES = {"submitted", "triage", "triaged", "fix", "review", "completed"}
+USER_KEY = "sk-ant-PLANTED-userkey-7f3a9c1e5b2d4f60a8c7e9d1"
+ENV_KEY = "sk-ant-PLANTED-envkey-0b1c2d3e4f5a6b7c8d9e0f1a"
 ADMIN_KEYS = {
     "analysisMode", "localized", "category", "triageConfidence", "rootCause",
     "rootCauseHypothesis", "explanation", "candidateFiles", "diff", "fixConfidence", "pr",
@@ -70,8 +74,16 @@ def _schema_error(body: Any) -> Optional[str]:
     if not isinstance(rev, int) or isinstance(rev, bool) or not 0 <= rev <= 2**53 - 1:
         return "revision"
     pub, adm = body["public"], body["admin"]
-    if not isinstance(pub, dict) or set(pub) != PUBLIC_KEYS:
+    if not isinstance(pub, dict) or not PUBLIC_KEYS <= set(pub) <= PUBLIC_KEYS | PUBLIC_OPTIONAL:
         return "public keys"
+    if pub.get("stage") not in LANES | {None}:
+        return "stage"
+    detail = pub.get("stageDetail")
+    if detail is not None and not (isinstance(detail, str) and 1 <= len(detail) <= 40
+                                   and all(c.islower() or c == "_" for c in detail)):
+        return "stageDetail"
+    if pub.get("prState") not in ("open", "merged", "closed", None):
+        return "prState"
     if not isinstance(adm, dict) or set(adm) != ADMIN_KEYS:
         return "admin keys"
     if pub["severity"] not in (None, "critical", "high", "medium", "low"):
@@ -109,6 +121,9 @@ class FakeTriage:
         self.drop_terminal: set[str] = set()       # same, for a terminal POST only
         self.drop_put_once: set[str] = set()       # PUT bug ids: lose the request entirely
         self.down = False                          # every request answers 502
+        self.keys: dict[str, str] = {}             # user id -> saved Claude key (B4)
+        self.released: set[str] = set()            # action ids whose key was released
+        self.credential_answer: Optional[Callable[[str], httpx.Response]] = None
         self._n = 0
 
     @staticmethod
@@ -158,6 +173,8 @@ class FakeTriage:
             return httpx.Response(401, json={"error": "unauthorized"})
         if request.method == "GET" and path == "/actions":
             return self._list(request)
+        if request.method == "POST" and path.startswith("/actions/") and path.endswith("/credential"):
+            return self._credential(path.split("/")[-2])
         if request.method == "POST" and path.startswith("/actions/"):
             return self._advance(path.split("/")[-1], body or {})
         if request.method == "PUT" and path.startswith("/results/"):
@@ -216,6 +233,30 @@ class FakeTriage:
             raise httpx.ReadError("response lost")
         return httpx.Response(200, json={"changed": True, "action": dict(action)})
 
+    def credential_calls(self, aid: Optional[str] = None) -> int:
+        return sum(1 for r in self.requests if r["path"].endswith("/credential")
+                   and (aid is None or f"/{aid}/" in r["path"]))
+
+    def _credential(self, aid: str) -> httpx.Response:
+        """The S3b release (plan §4): one statement, claimed + paid + not yet released."""
+        if self.credential_answer is not None:
+            return self.credential_answer(aid)
+        action = self.actions.get(aid)
+        if action is None:
+            return httpx.Response(404, json={"error": "not_found"})
+        if action["kind"] not in ("analyze_cloud", "fix_and_open_pr"):
+            return httpx.Response(409, json={"error": "not_paid"})
+        if action["state"] != "claimed":
+            return httpx.Response(409, json={"error": "not_claimed"})
+        if aid in self.released:
+            return httpx.Response(409, json={"error": "already_released"})
+        self.released.add(aid)
+        key = self.keys.get(action["requestedBy"]["userId"])
+        if key is None:
+            return httpx.Response(409, json={"error": "no_key"})
+        return httpx.Response(200, json={"provider": "anthropic", "apiKey": key},
+                              headers={"Cache-Control": "no-store"})
+
     def _put(self, bug: str, body: Any) -> httpx.Response:
         if bug in self.drop_put_once:
             self.drop_put_once.discard(bug)
@@ -258,8 +299,10 @@ class FakeStages:
             )
         return self.local
 
-    async def propose_fix(self, report_id, llm_override=None, *, attribution_ref=None, trigger_ref=None):
+    async def propose_fix(self, report_id, llm_override=None, *, attribution_ref=None, trigger_ref=None,
+                          require_request_key=False):
         self.calls.append(("fix", report_id, llm_override, attribution_ref, trigger_ref))
+        self.required_key = require_request_key
         if self.gate is not None:
             await self.gate.wait()
         if self.fix == "proposed":
@@ -1156,7 +1199,8 @@ def test_status_run_and_health_endpoints(fake, stages):
         assert status["configured"] and status["credential_present"]
         assert status["results_tracked"] == 1 and status["results_pending"] == 0
         health = client.get("/health").json()
-        assert health["triage_sync"] == {"enabled": False, "projects": 1, "failing": 0}
+        assert health["triage_sync"] == {"enabled": False, "user_keys": False, "projects": 1,
+                                         "failing": 0, "paid_in_flight": 0, "pr_check_errors": 0}
         for body in (run.text, json.dumps(status), json.dumps(health)):
             assert TOKEN not in body
         bare = db.project_create(name="bare", repo_url="https://github.com/x/z")["id"]
@@ -1249,3 +1293,338 @@ async def test_a_config_change_after_authorization_does_not_change_the_provider(
     assert stages.calls[0][2] == ("ollama", "gemma4:12b")
     assert fake.actions[first]["state"] == "done"
     assert fake.actions[second]["state"] == "refused"  # authorized after the change
+
+
+# ---------------------------------------------------------------------------
+# Phase 12 (B4): lanes, per-user keys, reopen
+# ---------------------------------------------------------------------------
+
+PIN = {"llm": {"provider": "anthropic", "model": "claude-test-model"}}
+
+
+@pytest.fixture
+def user_keys(monkeypatch, fake) -> FakeTriage:
+    """Gate on, allowlist gone, Jack has saved a key in sonicgrid."""
+    monkeypatch.setattr(settings, "sonicgrid_user_keys", True)
+    monkeypatch.setattr(settings, "sonicgrid_cloud_users", "")
+    monkeypatch.setattr(settings, "anthropic_api_key", ENV_KEY)
+    fake.keys["u-jack"] = USER_KEY
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_the_push_carries_the_lane(fake, stages):
+    pid = make_project()
+    make_report(pid, bug(1), fake)
+    make_report(pid, bug(2), fake, status="fix_committed", localized=False)
+    await ts.sync_project(pid)
+    one, two = fake.results[bug(1)]["public"], fake.results[bug(2)]["public"]
+    assert (one["stage"], one["stageDetail"], one["prState"]) == ("triaged", "localized", None)
+    assert (two["stage"], two["stageDetail"]) == ("review", "pr_open")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["analyze_cloud", "fix_and_open_pr"])
+async def test_gate_off_refuses_an_own_key_action_even_for_an_allowlisted_user(
+    fake, stages, monkeypatch, kind
+):
+    monkeypatch.setattr(settings, "anthropic_api_key", ENV_KEY)
+    pid = make_project()
+    make_report(pid, bug(1), fake)
+    aid = fake.add_action(kind, bug(1), params=PIN, email=JACK,
+                          consents={"cloudSpend": True, "repoWrite": True})
+    with patch("bugalizer.llm.client.complete", new=AsyncMock()) as complete:
+        await settle(pid)
+    assert fake.actions[aid]["state"] == "refused"
+    assert "not enabled on Bugalizer yet" in fake.actions[aid]["message"]
+    assert stages.calls == [] and complete.await_count == 0
+    assert fake.credential_calls() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("email, user", [(JACK, "u-jack"), (DAN, "u-dan")])
+async def test_gate_on_runs_on_the_requesters_key_without_the_allowlist(user_keys, stages, email, user):
+    user_keys.keys["u-dan"] = USER_KEY  # Dan was never allowlisted
+    pid = make_project()
+    make_report(pid, bug(1), user_keys)
+    aid = user_keys.add_action("analyze_cloud", bug(1), params=PIN, email=email, user=user)
+    await settle(pid)
+    assert user_keys.actions[aid]["state"] == "done"
+    (_, _, override, _, trigger) = stages.calls[0]
+    assert (override.provider, override.model) == ("anthropic", "claude-test-model")
+    assert override.api_key.get_secret_value() == USER_KEY
+    assert override.key_ref == f"sonicgrid:{user}" and trigger == aid
+    assert stages.required_key is True
+    assert user_keys.credential_calls(aid) == 1
+    row = ledger(aid)
+    assert (row["key_mode"], row["no_auto_retry"]) == ("requester", 1)
+
+
+@pytest.mark.asyncio
+async def test_gate_on_refuses_legacy_and_unpinned_actions(user_keys, stages):
+    pid = make_project()
+    make_report(pid, bug(1), user_keys)
+    legacy = user_keys.add_action("analyze_cloud", bug(1))
+    wrong = user_keys.add_action("analyze_cloud", bug(1), params={"llm": {"provider": "openai", "model": "m"}})
+    blank = user_keys.add_action("analyze_cloud", bug(1), params={"llm": {"provider": "anthropic", "model": " "}})
+    await settle(pid, ticks=3)
+    assert user_keys.actions[legacy]["message"].startswith("Requested before per-user keys")
+    for aid in (wrong, blank):
+        assert user_keys.actions[aid]["message"].startswith("Requested without a model pin")
+    assert all(user_keys.actions[a]["state"] == "refused" for a in (legacy, wrong, blank))
+    assert stages.calls == [] and user_keys.credential_calls() == 0
+
+
+def _answer(status: int, body: Any = None) -> Callable[[str], httpx.Response]:
+    return lambda aid: httpx.Response(status, json=body if body is not None else {})
+
+
+def _lost(fake: FakeTriage) -> Callable[[str], httpx.Response]:
+    def respond(aid: str) -> httpx.Response:
+        fake.released.add(aid)  # released, then the response is lost
+        raise httpx.ReadError("response lost")
+    return respond
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer, state, text", [
+    (_answer(200, {"provider": "anthropic"}), "failed", "invalid credential response"),
+    (_answer(200, {"provider": "openai", "apiKey": "sk-x"}), "failed", "invalid credential response"),
+    (_answer(200, {"provider": "anthropic", "apiKey": ""}), "failed", "invalid credential response"),
+    (_answer(200, ["not", "an", "object"]), "failed", "invalid credential response"),
+    (_answer(409, {"error": "already_released"}), "failed", "credential already used"),
+    (_answer(409, {"error": "no_key"}), "refused", "AI settings"),
+    (_answer(403, {"error": "requester_not_admin"}), "refused", "no longer a sonicgrid admin"),
+    (_answer(409, {"error": "not_claimed"}), "refused", "not_claimed"),
+    (_answer(404, {"error": "not_found"}), "refused", "not_found"),
+    (_answer(500), "failed", "could not fetch your API key"),
+    ("lost", "failed", "could not fetch your API key"),
+], ids=["no-key-field", "provider-mismatch", "empty-key", "not-object", "already-released",
+        "no-key", "not-admin", "not-claimed", "route-missing", "5xx", "lost-response"])
+@pytest.mark.parametrize("kind", ["analyze_cloud", "fix_and_open_pr"])
+async def test_credential_outcomes_never_reach_a_model(user_keys, stages, answer, state, text, kind):
+    user_keys.credential_answer = _lost(user_keys) if answer == "lost" else answer
+    pid = make_project()
+    make_report(pid, bug(1), user_keys)
+    aid = user_keys.add_action(kind, bug(1), params=PIN,
+                               consents={"cloudSpend": True, "repoWrite": True})
+    with patch("bugalizer.llm.client.complete", new=AsyncMock()) as complete:
+        await settle(pid, ticks=3)
+    action = user_keys.actions[aid]
+    assert action["state"] == state and text in action["message"], action["message"]
+    assert stages.calls == [] and complete.await_count == 0
+    assert user_keys.credential_calls(aid) == 1  # never retried
+    if kind == "fix_and_open_pr":
+        assert [s["state"] for s in action["steps"]] == [state, "skipped"]
+
+
+@pytest.mark.asyncio
+async def test_the_real_stage_spends_only_the_requesters_key(user_keys, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.ts").write_text("export const play = () => {}\n", encoding="utf-8")
+    pid = make_project(repo_path=str(repo))
+    make_report(pid, bug(1), user_keys)
+    make_report(pid, bug(2), user_keys)
+    ok = user_keys.add_action("analyze_cloud", bug(1), params=PIN)
+    response = LLMResponse(content=json.dumps({**_PROPOSAL, "files_changed": ["a.ts"]}),
+                           prompt_tokens=3, completion_tokens=2, model="claude-test-model",
+                           provider="anthropic")
+    with patch("bugalizer.pipeline.fix_proposer.llm_client.complete",
+               new=AsyncMock(return_value=response)) as complete:
+        await settle(pid)
+        assert user_keys.actions[ok]["state"] == "done", user_keys.actions[ok]["message"]
+        kwargs = complete.await_args.kwargs
+        assert (kwargs["provider"], kwargs["model"], kwargs["api_key"]) == (
+            "anthropic", "claude-test-model", USER_KEY)
+        usage = db.token_usage_summary()["attribution"]
+        assert {"key_source": "request", "key_ref": "sonicgrid:u-jack"}.items() <= usage[0].items()
+        # A malformed credential on the real path: no call at all, env key untouched.
+        bad = user_keys.add_action("analyze_cloud", bug(2), params=PIN)
+        user_keys.credential_answer = _answer(200, {"provider": "anthropic"})
+        await settle(pid)
+        assert user_keys.actions[bad]["state"] == "failed"
+        assert complete.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_require_request_key_raises_before_any_claim_or_call(tmp_path, monkeypatch):
+    from bugalizer.models import LLMOverride
+    monkeypatch.setattr(settings, "anthropic_api_key", ENV_KEY)
+    r = _fix_ready_report(tmp_path)
+    with patch("bugalizer.pipeline.fix_proposer.llm_client.complete", new=AsyncMock()) as complete:
+        with pytest.raises(ValueError):
+            await propose_fix(r["id"], llm_override=LLMOverride(provider="anthropic", model="m"),
+                              require_request_key=True)
+    assert complete.await_count == 0
+    assert db.report_get(r["id"])["status"] == "triaged"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["intent", "dispatched"])
+async def test_a_crash_around_the_fetch_is_unconfirmed_and_never_fetches_again(user_keys, stages, phase):
+    pid = make_project()
+    r = make_report(pid, bug(1), user_keys)
+    aid = user_keys.add_action("analyze_cloud", bug(1), params=PIN, state="claimed")
+    _seed_intent(pid, r["id"], aid, "analyze_cloud", pinned={"fix": ["anthropic", "m"]},
+                 no_auto_retry=True, phase=phase)
+    db.triage_action_update(aid, key_mode="requester")
+    if phase == "dispatched":
+        user_keys.released.add(aid)  # fetched, then the process died before the call
+    await settle(pid)
+    assert user_keys.actions[aid]["state"] == "failed"
+    assert "could not be confirmed" in user_keys.actions[aid]["message"]
+    assert stages.calls == [] and user_keys.credential_calls() == 0
+
+
+@pytest.mark.asyncio
+async def test_gate_on_drains_old_mode_actions_without_the_env_key(user_keys, stages):
+    pid = make_project()
+    r1 = make_report(pid, bug(1), user_keys)
+    r2 = make_report(pid, bug(2), user_keys)
+    intent = user_keys.add_action("fix_and_open_pr", bug(1), state="claimed")
+    _seed_intent(pid, r1["id"], intent, "fix_and_open_pr", pinned={"fix": ["ollama", "m"]},
+                 no_auto_retry=False)
+    dispatched = user_keys.add_action("analyze_cloud", bug(2), state="claimed")
+    _seed_intent(pid, r2["id"], dispatched, "analyze_cloud", pinned={"fix": ["anthropic", "m"]},
+                 no_auto_retry=False, phase="dispatched")  # hypothetical retry-allowed row
+    with patch("bugalizer.llm.client.complete", new=AsyncMock()) as complete:
+        await settle(pid, ticks=3)
+    assert user_keys.actions[intent]["state"] == "refused"
+    assert user_keys.actions[intent]["steps"][0]["state"] == "refused"
+    assert user_keys.actions[dispatched]["state"] == "refused"
+    assert stages.calls == [] and complete.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_the_user_key_is_nowhere(user_keys, stages, caplog):
+    caplog.set_level(logging.DEBUG)
+    pid = make_project()
+    make_report(pid, bug(1), user_keys)
+    make_report(pid, bug(2), user_keys)
+    user_keys.add_action("analyze_cloud", bug(1), params=PIN)
+    user_keys.add_action("fix_and_open_pr", bug(2), params=PIN,
+                         consents={"cloudSpend": True, "repoWrite": True})
+    await settle(pid, ticks=3)
+    stages.fix = "failed"
+    user_keys.credential_answer = _answer(200, {"provider": "openai", "apiKey": USER_KEY})
+    user_keys.add_action("analyze_cloud", bug(1), params=PIN)
+    await settle(pid, ticks=2)
+    dump = "\n".join(db._get_conn().iterdump())
+    assert USER_KEY not in caplog.text and USER_KEY not in dump
+    for q in user_keys.requests:
+        assert USER_KEY not in json.dumps(q["body"] or {})
+    with TestClient(app) as client:
+        assert USER_KEY not in client.get("/health").text
+        assert USER_KEY not in client.get(f"/api/v1/projects/{pid}/triage-sync").text
+
+
+@pytest.mark.asyncio
+async def test_health_counts_paid_actions_in_flight(user_keys, stages):
+    stages.gate = asyncio.Event()
+    pid = make_project()
+    make_report(pid, bug(1), user_keys)
+    user_keys.add_action("analyze_cloud", bug(1), params=PIN)
+    await ts.sync_project(pid)
+    counts = db.triage_sync_health_counts()
+    assert counts["paid_in_flight"] == 1
+    stages.gate.set()
+    await settle(pid)
+    assert db.triage_sync_health_counts()["paid_in_flight"] == 0
+
+
+# --- reopen ------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_reopen_a_closed_report(fake, stages):
+    pid = make_project()
+    r = make_report(pid, bug(1), fake)
+    db.report_update_status(r["id"], "closed", "pr_merged:7")
+    aid = fake.add_action("reopen", bug(1))
+    await settle(pid)
+    report = db.report_get(r["id"])
+    assert fake.actions[aid]["state"] == "done"
+    assert (report["status"], report["resolution_reason"]) == ("triaged", None)
+    assert fake.results[bug(1)]["public"]["stage"] == "triaged"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["triaged", "rejected", "duplicate"])
+async def test_reopen_refuses_anything_but_closed(fake, stages, status):
+    pid = make_project()
+    r = make_report(pid, bug(1), fake)
+    db.report_update_status(r["id"], status)
+    aid = fake.add_action("reopen", bug(1))
+    await settle(pid)
+    assert fake.actions[aid]["state"] == "refused"
+    assert status in fake.actions[aid]["message"]
+    assert db.report_get(r["id"])["status"] == status
+
+
+@pytest.mark.asyncio
+async def test_a_committed_reopen_is_posted_not_replayed_after_a_crash(fake, stages):
+    pid = make_project()
+    r = make_report(pid, bug(1), fake)
+    db.report_update_status(r["id"], "closed")
+    aid = fake.add_action("reopen", bug(1))
+    fake.drop_terminal.add(aid)  # the terminal POST commits, its response is lost
+    await ts.sync_project(pid)
+    assert ledger(aid)["outcome"] == "done"
+    fake.actions[aid]["state"] = "claimed"  # as if the POST never landed
+    ts.reset_runtime_state()  # restart
+    db.report_update_status(r["id"], "fix_proposing")  # the worker moved on
+    await settle(pid)
+    assert fake.actions[aid]["state"] == "done"
+    assert db.report_get(r["id"])["status"] == "fix_proposing"
+
+
+@pytest.mark.asyncio
+async def test_an_uncommitted_reopen_is_replayed_against_the_real_status(fake, stages):
+    pid = make_project()
+    r = make_report(pid, bug(1), fake)
+    db.report_update_status(r["id"], "closed")
+    aid = fake.add_action("reopen", bug(1), state="claimed")
+    _seed_intent(pid, r["id"], aid, "reopen", pinned={}, no_auto_retry=False, phase="dispatched")
+    await settle(pid)
+    assert fake.actions[aid]["state"] == "done"
+    assert db.report_get(r["id"])["status"] == "triaged"
+
+
+def test_reopen_rolls_back_when_the_ledger_has_moved():
+    pid = make_project()
+    r = make_report(pid, bug(1))
+    db.report_update_status(r["id"], "closed", "pr_merged:7")
+    db.triage_action_reserve("a-1", pid, r["id"], "reopen", {}, "u-jack")
+    db.triage_action_finish("a-1", "failed", "timed out")
+    assert db.reopen_for_action(r["id"], "a-1", "x") == "ledger_moved"
+    report = db.report_get(r["id"])
+    assert (report["status"], report["resolution_reason"]) == ("closed", "pr_merged:7")
+    assert ledger("a-1")["outcome"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_pr_checks_run_while_sonicgrid_is_in_backoff(fake, stages, monkeypatch):
+    from pydantic import SecretStr
+    monkeypatch.setattr(settings, "github_token", SecretStr("ghp-PLANTED"))
+    reads: list[int] = []
+
+    async def merged(project, number):
+        reads.append(number)
+        return "merged"
+    monkeypatch.setattr(ts, "read_pr_state", merged)
+    pid = make_project()
+    r = make_report(pid, bug(1), fake, status="fix_committed")
+    p = db.fix_proposal_create(bug_report_id=r["id"], analysis_id=None, root_cause="rc",
+                               explanation="ex", diff="d", confidence=0.5, files_changed=["x"])
+    conn = db._get_conn()
+    conn.execute("UPDATE fix_proposals SET pr_url = 'https://github.com/o/r/pull/9', pr_number = 9, "
+                 "branch_name = 'fix/b' WHERE id = ?", (p["id"],))
+    conn.commit()
+    ts._skip[pid] = 4  # sonicgrid is backing off
+    await ts.run_tick()
+    report = db.report_get(r["id"])
+    assert (report["status"], report["resolution_reason"]) == ("closed", "pr_merged:9")
+    assert fake.requests == []  # the sonicgrid exchange stayed skipped
+    assert ts._skip[pid] == 3
+    await ts.run_tick()
+    assert reads == [9]  # settled: not read again on later ticks

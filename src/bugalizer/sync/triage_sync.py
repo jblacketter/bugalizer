@@ -19,6 +19,13 @@ The triage token is resolved by name from the environment at request time
 and sent only in the Authorization header; it is never stored, logged or
 returned, and redirects are not followed. Requester emails are read from the
 listing for the allowlist check and never stored or logged (D-D).
+
+Phase 12 (B4): before the sonicgrid exchange, each tick also reads the fate
+of recorded fix PRs on GitHub (`_check_prs`; merged completes the report,
+closed unmerged returns it to `triaged`). A `key_mode=requester` action
+fetches its requester's key once, from sonicgrid's credential endpoint,
+after it is durably `dispatched` and before the model call (`_fetch_key`);
+the key is never stored, logged or retried.
 """
 
 from __future__ import annotations
@@ -36,6 +43,7 @@ import httpx
 
 from bugalizer import db
 from bugalizer.config import resolve_env_credential, settings
+from bugalizer.git_ops.pull_request import PrReadError, read_pr_state
 from bugalizer.models import triage_base_url
 from bugalizer.sync import actions as ex
 from bugalizer.sync.results import build_payload, canonical, fingerprint
@@ -59,6 +67,8 @@ _BACKOFF_ERRORS = frozenset({UNAUTHORIZED, SOURCE_NOT_CONFIGURED, NETWORK_ERROR,
 MAX_BACKOFF_TICKS = 32
 PAGE_LIMIT = 100
 MAX_PAGES = 100
+PR_CHECK_SECONDS = 300            # at most one GitHub read per PR per 5 minutes
+CREDENTIAL_FETCH_FAILED = "could not fetch your API key; request again"
 
 # Test seam: tests point the sync at a fake sonicgrid via httpx.MockTransport.
 http_transport: Optional[httpx.AsyncBaseTransport] = None
@@ -313,6 +323,101 @@ def expire_overdue(project_id: Optional[str] = None) -> int:
 # Execution
 # ---------------------------------------------------------------------------
 
+def _run_inline(row: dict[str, Any]) -> None:
+    """An inline kind from `dispatched`. `reopen` writes the report change
+    and its ledger outcome in one transaction (plan §3), so a committed
+    reopen is never replayed; the rest finish through `_finish`."""
+    action_id = row["action_id"]
+    if row["kind"] != "reopen":
+        _finish(action_id, ex.run_inline(row), expected_phase="dispatched")
+        return
+    applied = db.reopen_for_action(row["report_id"], action_id, ex.REOPENED)
+    if applied == "done" or applied == "ledger_moved":
+        return  # finished by this call, or the row moved on (nothing changed)
+    report = db.report_get(row["report_id"])
+    message = (ex.reopen_refusal(report["status"]) if report
+               else "Bug report not found in Bugalizer")
+    _finish(action_id, ex.Result("refused", message), expected_phase="dispatched")
+
+
+def _credential_code(body: dict[str, Any]) -> str:
+    code = body.get("error") or body.get("code")
+    if isinstance(code, str) and code and len(code) <= 40 and all(c.islower() or c == "_" for c in code):
+        return code
+    return "unknown"
+
+
+def _credential_outcome(row: dict[str, Any], resp: httpx.Response) -> "str | ex.Result":
+    """The plan's §4 table: the key on a valid 200, else the action's result.
+    Never logs or echoes the body."""
+    kind = row["kind"]
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        body = None
+    status = resp.status_code
+    if status == 200:
+        pin = (row.get("pinned_llm") or {}).get("fix")
+        pinned_provider = pin[0] if isinstance(pin, list) and pin else None
+        key = (body or {}).get("apiKey")
+        provider = (body or {}).get("provider")
+        if (provider == ex.REQUESTER_PROVIDER and provider == pinned_provider
+                and isinstance(key, str) and key):
+            return key
+        return ex.step_result(kind, "failed", "invalid credential response")
+    code = _credential_code(body or {})
+    if status == 409 and code == "already_released":
+        return ex.step_result(kind, "failed", "credential already used; request again")
+    if status == 409 and code == "no_key":
+        return ex.step_result(kind, "refused", (
+            "No Claude API key is saved for the requester; add it in AI settings "
+            "and request again"
+        ))
+    if status == 403:
+        return ex.step_result(kind, "refused", "The requester is no longer a sonicgrid admin")
+    if status in (404, 409):
+        return ex.step_result(kind, "refused", (
+            f"Sonicgrid did not release a key for this action ({code if status == 409 else 'not_found'})"
+        ))
+    return ex.step_result(kind, "failed", CREDENTIAL_FETCH_FAILED)
+
+
+async def _fetch_key(row: dict[str, Any]) -> "str | ex.Result":
+    """One credential request for a claimed paid action (no body; the
+    triage token in the header). A lost response is not retried: the key
+    may have been released, and I3 allows one release per action."""
+    kind = row["kind"]
+    project = db.project_get(row["project_id"]) or {}
+    config = project.get("ingest_config")
+    env_name = config.get("triage_credential_env") if isinstance(config, dict) else None
+    base = triage_base_url(config) if isinstance(config, dict) else None
+    token = (resolve_env_credential(env_name) or "") if env_name else ""
+    if not base or not token:
+        return ex.step_result(kind, "failed", CREDENTIAL_FETCH_FAILED)
+    try:
+        async with httpx.AsyncClient(
+            timeout=settings.ingest_timeout_seconds, follow_redirects=False,
+            transport=http_transport,
+        ) as client:
+            resp = await client.post(
+                f"{base}/actions/{row['action_id']}/credential",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("triage action=%s credential fetch failed (%s)",
+                       row["action_id"], type(exc).__name__)
+        return ex.step_result(kind, "failed", CREDENTIAL_FETCH_FAILED)
+    finally:
+        token = ""
+    outcome = _credential_outcome(row, resp)
+    if not isinstance(outcome, str):
+        logger.warning("triage action=%s credential answered %d",
+                       row["action_id"], resp.status_code)
+    return outcome
+
+
 async def _run_pr(action_id: str) -> None:
     """The open-pr step: an `open_pr` action, or `fix_and_open_pr` after its
     `fix_done` checkpoint (with that checkpoint's proposal id only)."""
@@ -386,14 +491,22 @@ async def _run_task(action_id: str) -> None:
         row = db.triage_action_get(action_id)
         if row is None:
             return
+        api_key: Optional[str] = None
         try:
-            result = await ex.run_llm(row)
+            fetched = await _fetch_key(row) if row.get("key_mode") == ex.REQUESTER else None
+            if isinstance(fetched, ex.Result):
+                result = fetched  # no model call
+            else:
+                api_key = fetched
+                result = await ex.run_llm(row, api_key)
         except Exception as exc:
             logger.error("triage action=%s failed (%s)", action_id, type(exc).__name__)
             message = f"The analysis failed unexpectedly ({type(exc).__name__})"
             result = ex.Result("failed", message, ex.compound_steps(
                 {"step": "fix", "state": "failed", "message": message}
             ) if row["kind"] == "fix_and_open_pr" else None)
+        finally:
+            api_key = None
         if _expire_if_overdue(action_id):
             # Finished late: the posted outcome stands, the PR step never runs.
             db.triage_action_update(action_id, late_outcome=result.outcome)
@@ -427,7 +540,7 @@ async def _dispatch(row: dict[str, Any], outcome: TickOutcome, *, from_phase: st
         _spawn_pr(action_id)
         return
     try:
-        _finish(action_id, ex.run_inline(row), expected_phase="dispatched")
+        _run_inline(row)
     finally:
         _release(action_id)
 
@@ -460,6 +573,7 @@ async def _claim_and_start(api: _Api, project: dict[str, Any], action: dict[str,
         if not db.triage_action_update(
             action_id, expected_phase="reserved", phase="intent", intent_at=_now_iso(),
             pinned_llm=auth.pinned, no_auto_retry=int(auth.no_auto_retry),
+            key_mode=auth.key_mode,
         ):
             return
         await _dispatch(db.triage_action_get(action_id), outcome, from_phase="intent")
@@ -500,7 +614,7 @@ async def _recover(row: dict[str, Any], outcome: TickOutcome) -> None:
                 _spawn_pr(action_id)
                 return
             try:
-                _finish(action_id, ex.run_inline(row), expected_phase="dispatched")
+                _run_inline(row)
             finally:
                 _release(action_id)
         return
@@ -512,6 +626,12 @@ async def _recover(row: dict[str, Any], outcome: TickOutcome) -> None:
             return
         if phase == "dispatched" and ex.stage_claim_held(row["report_id"]):
             return  # still inside a stage claim: wait, up to the time bound
+        if (phase == "intent" and settings.sonicgrid_user_keys and kind in ex.PAID_KINDS
+                and row.get("key_mode") != ex.REQUESTER):
+            # Drain rule: authorized under the old rules, never dispatched.
+            _finish(action_id, ex.step_result(kind, "refused", ex.LEGACY_REFUSAL),
+                    expected_phase=phase)
+            return
         if row.get("no_auto_retry"):
             _finish(action_id, ex.unconfirmed_failure(kind), expected_phase=phase)
             return
@@ -586,7 +706,8 @@ async def _push(api: _Api, project: dict[str, Any], outcome: TickOutcome) -> Non
     todo: list[tuple[str, dict[str, Any], str, Optional[dict[str, Any]], Optional[dict[str, Any]]]] = []
     for report in db.sync_reports(project["id"]):
         core = build_payload(
-            report, db.analyses_for_report(report["id"]), db.fix_proposals_for_report(report["id"])
+            report, db.analyses_for_report(report["id"]), db.fix_proposals_for_report(report["id"]),
+            project,
         )
         fp = fingerprint(core)
         stored = db.triage_result_get(report["id"])
@@ -625,6 +746,51 @@ async def _push(api: _Api, project: dict[str, Any], outcome: TickOutcome) -> Non
 
 
 # ---------------------------------------------------------------------------
+# PR state (plan §2)
+# ---------------------------------------------------------------------------
+
+async def _check_prs(project: dict[str, Any]) -> None:
+    """Read each unsettled recorded PR of a `fix_committed` report, at most
+    once per PR_CHECK_SECONDS. A failed read changes nothing but the check
+    time and error code; a rate limit ends this tick's reads."""
+    if settings.github_token_value() is None:
+        return
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=PR_CHECK_SECONDS)).isoformat()
+    for proposal in db.prs_to_check(project["id"], cutoff):
+        number = int(proposal["pr_number"])
+        try:
+            state = await read_pr_state(project, number)
+        except PrReadError as err:
+            db.pr_check_record(proposal["id"], error=err.code)
+            logger.warning("triage project=%s PR #%d read failed (%s)",
+                           project["id"], number, err.code)
+            if err.code == "rate_limited":
+                return
+            continue
+        if state == "open":
+            db.pr_check_record(proposal["id"], state="open")
+            continue
+        moved = db.pr_settle(proposal["id"], proposal["bug_report_id"], number, state)
+        logger.info("triage project=%s PR #%d %s (report %s)", project["id"], number, state,
+                    "moved" if moved else "status left alone")
+
+
+async def check_prs_only(project_id: str) -> None:
+    """The PR step alone, for a project whose sonicgrid exchange is in
+    backoff: GitHub is not sonicgrid, so a sonicgrid outage must not delay
+    merge detection. Same project lock as a tick; if a tick holds it, that
+    tick runs the step itself. The per-PR interval is durable, so this never
+    reads a PR more often than an ordinary tick would."""
+    lock = _project_lock(project_id)
+    if lock.locked():
+        return
+    async with lock:
+        project = db.project_get(project_id)
+        if project:
+            await _check_prs(project)
+
+
+# ---------------------------------------------------------------------------
 # Tick
 # ---------------------------------------------------------------------------
 
@@ -652,6 +818,11 @@ async def sync_project(project_id: str, *, manual: bool = False) -> TickOutcome:
             return outcome
         token = ""
         expire_overdue(project_id)  # before any HTTP: the bound never waits on sonicgrid
+        try:
+            # GitHub, not sonicgrid: a sonicgrid outage never delays a merge.
+            await _check_prs(project)
+        except Exception as exc:
+            logger.error("triage project=%s PR check failed (%s)", project_id, type(exc).__name__)
         try:
             if _duplicate_source(project, base):
                 outcome.error = DUPLICATE_SOURCE
@@ -703,6 +874,10 @@ async def run_tick() -> None:
         remaining = _skip.get(pid, 0)
         if remaining > 0:
             _skip[pid] = remaining - 1
+            try:
+                await check_prs_only(pid)  # sonicgrid backs off, GitHub reads do not
+            except Exception as exc:
+                logger.error("triage project=%s PR check failed (%s)", pid, type(exc).__name__)
             continue
         try:
             outcome = await sync_project(pid)

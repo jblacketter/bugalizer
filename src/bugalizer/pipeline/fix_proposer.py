@@ -292,6 +292,7 @@ async def propose_fix(
     *,
     attribution_ref: Optional[str] = None,
     trigger_ref: Optional[str] = None,
+    require_request_key: bool = False,
 ) -> FixOutcome:
     """Run the fix-proposal stage for a report.
 
@@ -312,7 +313,13 @@ async def propose_fix(
     `key_ref` when the call runs on the env key (`key_source=env`); a request
     key keeps its own `key_ref`. `trigger_ref` tags the analysis and proposal
     rows with the triage action that started this run. Returns a FixOutcome.
+
+    Phase 12: `require_request_key=True` (sonicgrid per-user keys) raises
+    before the claim, and so before any model call, when the override
+    carries no key, so `complete()` can never fall back to the env key.
     """
+    if require_request_key and not (llm_override is not None and llm_override.has_key()):
+        raise ValueError("propose_fix: a request key is required and none was given")
     # Secrets to scrub from any error text (empty when no request key).
     secrets: list[str] = []
     request_key: Optional[str] = None

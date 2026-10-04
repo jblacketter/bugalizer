@@ -46,6 +46,7 @@ src/bugalizer/
     triage_sync.py # Triage sync tick: action walk, ledger recovery, terminal drain, results push (Phase 11)
     actions.py     # Action executor: authorization (allowlist, pins), kinds, open-pr step, evidence
     results.py     # Result payload builder + fingerprint (pure)
+    stage.py       # Board lane + stage detail of a report (pure, Phase 12)
   git_ops/
     repo.py        # Git clone, pull, SHA, file listing via subprocess
     pull_request.py # open-pr: detached worktree commit, guarded push, GitHub PR (Phase 8)
@@ -63,7 +64,8 @@ tests/
   test_fix_proposer.py # Stage 4: proposals, retry classification, override + key secrecy
   test_open_pr.py  # open-pr against a real git http-backend + mock GitHub API
   test_ingest.py   # ingest poller against a fake sonicgrid (cursor rules, re-walk, fencing, secrecy)
-  test_triage_sync.py # triage sync against a fake sonicgrid (push, kinds, allowlist, recovery, secrecy)
+  test_triage_sync.py # triage sync against a fake sonicgrid (push, kinds, allowlist, recovery, secrecy, per-user keys, reopen)
+  test_stage.py    # board lane mapping (Phase 12)
 ```
 
 ## Architecture
@@ -109,6 +111,13 @@ tests/
   (`BUGALIZER_TRIAGE_SYNC_ENABLED`); per project `ingest_config.triage_credential_env`
   (`SONICGRID_TRIAGE_TOKEN`). Durable `triage_actions` ledger, `trigger_ref` tags on stage rows,
   cloud allowlist `BUGALIZER_SONICGRID_CLOUD_USERS`. BOWIE walk: `docs/sonicgrid-triage-acceptance.md`.
+
+- **Phase 12 (per-user-cloud-keys, B4): plan codex-approved 2026-10-03 (round 3, PR #14); IMPLEMENTED on `phase-12/per-user-cloud-keys`, impl review pending** (`docs/phases/per-user-cloud-keys.md`):
+  results carry `stage`/`stageDetail`/`prState` (`sync/stage.py`); recorded fix PRs are read on GitHub
+  (merged → closed `pr_merged:<n>`, closed → triaged); `reopen` action (atomic with its ledger outcome);
+  `BUGALIZER_SONICGRID_USER_KEYS` gate: paid sonicgrid actions run only on the requester's key fetched
+  once from sonicgrid's credential endpoint (`key_mode=requester`), never the env key. Activation:
+  `docs/deploy-windows.md` §7e.
 
 ## Handoff Workflow
 Uses tagteam: claude (lead) ↔ codex (reviewer). Read `tagteam.yaml` and `handoff-state.json`,

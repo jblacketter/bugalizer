@@ -16,6 +16,7 @@ import math
 from typing import Any, Optional
 
 from bugalizer.models import AnalysisMode, BugStatus, Severity
+from bugalizer.sync.stage import stage_of
 
 SUMMARY_MAX = 2_000
 CATEGORY_MAX = 50
@@ -30,6 +31,7 @@ BRANCH_MAX = 255
 _STATUSES = {s.value for s in BugStatus}
 _SEVERITIES = {s.value for s in Severity}
 _MODES = {m.value for m in AnalysisMode}
+_PR_STATES = {"open", "merged", "closed"}
 
 
 def _text(value: Any, limit: int) -> Optional[str]:
@@ -104,10 +106,12 @@ def build_payload(
     report: dict[str, Any],
     analyses: list[dict[str, Any]],
     proposals: list[dict[str, Any]],
+    project: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """The contract body minus `revision`. `analyses` and `proposals` are the
     report's rows, newest first (as db.analyses_for_report /
-    db.fix_proposals_for_report return them)."""
+    db.fix_proposals_for_report return them). `project` gives the head
+    commit the board's `stale`/`localized` detail is judged against (B4)."""
     triage = _latest_completed(analyses, "triage")
     triage_result = triage.get("result") if triage and isinstance(triage.get("result"), dict) else {}
     localization = _latest_completed(analyses, "localization")
@@ -124,6 +128,8 @@ def build_payload(
             pr = None
 
     status = report.get("status")
+    stage, stage_detail = stage_of(report, analyses, proposals, project)
+    pr_state = (recorded or {}).get("pr_state")
     severity = report.get("severity")
     mode = report.get("analysis_mode")
 
@@ -140,6 +146,11 @@ def build_payload(
             "summary": _text(triage_result.get("summary"), SUMMARY_MAX),
             "severity": severity if severity in _SEVERITIES else None,
             "prUrl": _pr_url(recorded.get("pr_url")) if recorded else None,
+            # B4: the board lane; sonicgrid's status follows `stage` on an
+            # applied push (contract "Status sync").
+            "stage": stage,
+            "stageDetail": stage_detail,
+            "prState": pr_state if pr_state in _PR_STATES else None,
         },
         "admin": {
             "analysisMode": mode if mode in _MODES else None,
