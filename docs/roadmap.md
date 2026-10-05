@@ -241,7 +241,8 @@ tree-sitter / uv
     spend is under-reported.
   - A sonicgrid action on a bug Bugalizer never imported (e.g. one already resolved
     before ingest started) stays queued forever; it counts in `unresolved_actions`
-    (4 on BOWIE). Refusing it with "not found in Bugalizer" would close it.
+    (4 on BOWIE until those bugs were removed in sonicgrid, 0 as of 2026-10-05).
+    Refusing it with "not found in Bugalizer" would close it.
   - Sonicgrid titles derive from the first description line, so reports filed with
     the dialog's template get the title "What happened:".
   - `_extract_json` returns the first object that parses; an example object in prose
@@ -252,6 +253,11 @@ tree-sitter / uv
   - A project's own `llm_model` overrides the `BUGALIZER_DEFAULT_*_MODEL` env defaults;
     both BOWIE projects carried `qwen2.5-coder:7b`, which BOWIE does not have, and were
     cleared to `""`.
+  - Results for reports whose sonicgrid bug no longer exists stay in `result_errors`
+    forever. After the Phase 13 deploy (2026-10-05) every report re-pushed once, and the
+    11 soft-deleted test reports got `404` (their bugs were removed in sonicgrid); `_push`
+    does not retry the same fingerprint, so they stay listed. Treating a `404` as "bug
+    gone" (stop tracking, or drop the `triage_results` row) would clear them.
 - **Test-data cleanup (2026-10-03):** the 8 test bugs in sonicgrid's Active list were
   marked resolved; 14 test reports were soft-deleted in Bugalizer (11 sonicgrid
   imports, 3 smoke). Kept: `f8c0a9dbbe304f93` (real bug, GitHub issue #100). The
