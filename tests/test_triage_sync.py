@@ -64,6 +64,7 @@ ADMIN_KEYS = {
     "analysisMode", "localized", "category", "triageConfidence", "rootCause",
     "rootCauseHypothesis", "explanation", "candidateFiles", "diff", "fixConfidence", "pr",
 }
+ADMIN_OPTIONAL = {"triageModel", "localizationModel", "fixModel"}   # B5 (Phase 52 contract)
 
 
 def _schema_error(body: Any) -> Optional[str]:
@@ -84,8 +85,12 @@ def _schema_error(body: Any) -> Optional[str]:
         return "stageDetail"
     if pub.get("prState") not in ("open", "merged", "closed", None):
         return "prState"
-    if not isinstance(adm, dict) or set(adm) != ADMIN_KEYS:
+    if not isinstance(adm, dict) or not ADMIN_KEYS <= set(adm) <= ADMIN_KEYS | ADMIN_OPTIONAL:
         return "admin keys"
+    for key in ADMIN_OPTIONAL:
+        v = adm.get(key)
+        if v is not None and not (isinstance(v, str) and 1 <= len(v) <= 120):
+            return key
     if pub["severity"] not in (None, "critical", "high", "medium", "low"):
         return "severity"
     if pub["summary"] is not None and len(pub["summary"]) > 2000:
@@ -531,6 +536,115 @@ def test_payload_respects_contract_limits():
     assert payload["admin"]["pr"] == {"number": 3, "branch": "fix/bugalizer-1"}
     assert payload["bugalizerUpdatedAt"] == "2026-10-01T00:00:03+00:00"
     assert fingerprint(payload) == fingerprint({"revision": 99, **payload})
+
+
+# B5: which model produced each part.
+
+def _ran(phase: str, at: str, provider: Optional[str], model: Optional[str],
+         status: str = "completed") -> dict[str, Any]:
+    return {"id": f"{phase}-{at}", "phase": phase, "status": status, "created_at": at,
+            "llm_provider": provider, "llm_model": model, "result": {}}
+
+
+@pytest.mark.parametrize("provider, model, label", [
+    ("ollama", "ollama/qwen2.5-coder:14b", "ollama/qwen2.5-coder:14b"),   # never doubled
+    ("anthropic", "claude-x", "anthropic/claude-x"),
+    ("openai", "gpt-4o", "openai/gpt-4o"),                                # passthrough
+    ("openai", "openai/gpt-4o", "openai/gpt-4o"),
+    (None, "bare-model", "bare-model"),
+    ("ollama", None, None),
+    ("ollama", "", None),
+])
+def test_model_label_rules(provider, model, label):
+    payload = build_payload({"status": "triaged"}, [_ran("triage", "t1", provider, model)], [])
+    assert payload["admin"]["triageModel"] == label
+    assert _schema_error({"revision": 1, **payload}) is None
+
+
+def test_model_label_is_cut_to_the_contract_limit():
+    payload = build_payload({"status": "triaged"}, [_ran("localization", "t1", "ollama", "m" * 200)], [])
+    assert len(payload["admin"]["localizationModel"]) == 120
+    assert _schema_error({"revision": 1, **payload}) is None
+
+
+def test_model_fields_are_null_without_the_analyses():
+    payload = build_payload({"status": "submitted"}, [], [])
+    assert {k: payload["admin"][k] for k in ADMIN_OPTIONAL} == dict.fromkeys(ADMIN_OPTIONAL)
+    # a triage that failed names no model
+    payload = build_payload({"status": "triaged"},
+                            [_ran("triage", "t1", "ollama", "ollama/m", status="failed")], [])
+    assert payload["admin"]["triageModel"] is None
+
+
+def test_fix_model_is_the_fix_that_made_the_newest_proposal():
+    analyses = [  # newest first, as db.analyses_for_report returns them
+        _ran("fix", "t9", "anthropic", "anthropic/later-no-proposal"),
+        _ran("fix", "t8", "anthropic", "anthropic/later-failed", status="failed"),
+        _ran("fix", "t6", "anthropic", "anthropic/claude-new"),
+        _ran("localization", "t5", "ollama", "ollama/qwen2.5-coder:14b"),
+        _ran("fix", "t3", "ollama", "ollama/old-fix"),
+        _ran("triage", "t1", "ollama", "ollama/gemma4:12b"),
+    ]
+    proposals = [  # analysis_id is the localization the fix was built on, never the fix
+        {"created_at": "t7", "analysis_id": "localization-t5", "updated_at": "t7"},
+        {"created_at": "t4", "analysis_id": "localization-t2", "updated_at": "t4"},
+    ]
+    admin = build_payload({"status": "fix_proposed"}, analyses, proposals)["admin"]
+    assert admin["fixModel"] == "anthropic/claude-new"
+    assert admin["localizationModel"] == "ollama/qwen2.5-coder:14b"
+    assert admin["triageModel"] == "ollama/gemma4:12b"
+    # with only the older proposal, its own fix is named
+    assert build_payload({"status": "fix_proposed"}, analyses, proposals[1:])["admin"]["fixModel"] \
+        == "ollama/old-fix"
+    # a proposal with no fix analysis before it names none
+    assert build_payload({"status": "fix_proposed"}, analyses[3:4],
+                         proposals)["admin"]["fixModel"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_push_carries_the_models(fake, stages):
+    pid = make_project()
+    r = make_report(pid, bug(1), fake, localized=False)
+    db.analysis_create(r["id"], "triage", "completed", result={"summary": "s"},
+                       llm_provider="ollama", llm_model="ollama/gemma4:12b")
+    db.analysis_create(r["id"], "localization", "completed", result={},
+                       llm_provider="ollama", llm_model="ollama/qwen2.5-coder:14b")
+    loc = db.analyses_for_report(r["id"], phase="localization")[0]
+    db.analysis_create(r["id"], "fix", "completed", result={},
+                       llm_provider="anthropic", llm_model="anthropic/claude-sonnet-5-5")
+    db.fix_proposal_create(bug_report_id=r["id"], analysis_id=loc["id"], root_cause="rc",
+                           explanation="ex", diff="", confidence=0.5, files_changed=[])
+    await ts.sync_project(pid)
+    adm = fake.results[bug(1)]["admin"]
+    assert (adm["triageModel"], adm["localizationModel"], adm["fixModel"]) == (
+        "ollama/gemma4:12b", "ollama/qwen2.5-coder:14b", "anthropic/claude-sonnet-5-5")
+
+
+@pytest.mark.asyncio
+async def test_a_result_pushed_before_b5_repushes_once_and_is_applied(fake, stages, monkeypatch):
+    pid = make_project()
+    r = make_report(pid, bug(1), fake, localized=False)
+    db.analysis_create(r["id"], "triage", "completed", result={"summary": "s"},
+                       llm_provider="ollama", llm_model="ollama/gemma4:12b")
+
+    def pre_b5(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        payload = build_payload(*args, **kwargs)
+        for key in ADMIN_OPTIONAL:
+            del payload["admin"][key]
+        return payload
+
+    monkeypatch.setattr(ts, "build_payload", pre_b5)
+    await ts.sync_project(pid)
+    old = fake.results[bug(1)]
+    assert "triageModel" not in old["admin"]
+
+    monkeypatch.setattr(ts, "build_payload", build_payload)  # the upgraded service
+    await ts.sync_project(pid)
+    new = fake.results[bug(1)]
+    assert new["revision"] > old["revision"]
+    assert new["admin"]["triageModel"] == "ollama/gemma4:12b"
+    await ts.sync_project(pid)
+    assert len(fake.puts(bug(1))) == 2
 
 
 @pytest.mark.asyncio

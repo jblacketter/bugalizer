@@ -119,6 +119,11 @@ tests/
   once from sonicgrid's credential endpoint (`key_mode=requester`), never the env key. Activation:
   `docs/deploy-windows.md` §7e.
 
+- **Phase 13 (sonicgrid-result-models, B5): plan codex-approved 2026-10-04; IMPLEMENTED on
+  `phase-13/sonicgrid-result-models`, impl codex-approved 2026-10-04 (round 1); not yet committed/merged** (`docs/phases/sonicgrid-result-models.md`):
+  results carry `admin.triageModel`/`localizationModel`/`fixModel` (`<provider>/<model>` of what ran).
+  **Deploy order:** sonicgrid PR #639 must be live in production before BOWIE runs this (else 400s).
+
 ## Handoff Workflow
 Uses tagteam: claude (lead) ↔ codex (reviewer). Read `tagteam.yaml` and `handoff-state.json`,
 then follow the handoff contract: `/tagteam:handoff` (Claude Code plugin) or `tagteam contract`.
