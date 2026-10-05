@@ -269,6 +269,31 @@ tree-sitter / uv
   new board, and reads fix PRs' state on GitHub so a merged PR completes the bug.
 - **Depends on:** Phase 11, Phase 8
 
+### Phase 13: sonicgrid-result-models
+- **Status:** Plan codex-approved 2026-10-04 (round 1); implemented on
+  `phase-13/sonicgrid-result-models`, impl codex-approved 2026-10-04 (round 1); merge + BOWIE acceptance pending (`docs/phases/sonicgrid-result-models.md`). B5. Sonicgrid
+  PR #639 (Phase 52 `bugalizer-result-models`) merged 2026-10-04; **BOWIE must not be redeployed
+  with this phase until #639 is deployed to production.** Pushing the new
+  fields to an older sonicgrid gets `400` on every push (strict schema), which stops board sync.
+- **Description:** Push which model produced each part of the analysis, so the sonicgrid admin
+  drawer can show "Models: triage … · localization … · fix …" and models can be compared.
+  In `src/bugalizer/sync/results.py` `build_payload`, add three `admin` fields as
+  `"<provider>/<model>"` (max 120 chars) or null:
+  - `triageModel`: from the latest completed `triage` analysis (`analyses.llm_provider` / `llm_model`).
+  - `localizationModel`: from the latest completed `localization` analysis.
+  - `fixModel`: from the `fix` analysis that produced the newest proposal (not
+    `fix_proposals.analysis_id`, which is the *localization* the fix was built on; see plan §2).
+  Labels must not double the prefix: `llm_model` is already `ollama/…` / `anthropic/…`.
+  Use the per-analysis columns (what actually ran), not the project's configured
+  `llm_model` / `fix_llm_model`. `fingerprint()` already covers `admin`, so the new fields change
+  the fingerprint and each bug re-pushes with a higher revision automatically.
+- **Contract:** sonicgrid `documentation/BUGALIZER-TRIAGE-ENDPOINTS.md`, "Push a result" table,
+  row `admin.triageModel` / `localizationModel` / `fixModel` (Phase 52).
+- **Acceptance:** after the BOWIE redeploy, open a triaged bug in sonicgrid `/admin/bugs` and see
+  the Models line; a cloud-fixed bug also shows `fix anthropic/…`. Do not hand-push a result to
+  production to test it (a high revision would block later real pushes).
+- **Depends on:** Phase 11 (B3 push), Phase 12 (B4); sonicgrid Phase 52 deployed.
+
 ## Decision Log
 See `docs/decision_log.md`
 

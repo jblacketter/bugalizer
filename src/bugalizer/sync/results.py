@@ -27,6 +27,7 @@ REASON_MAX = 2_000
 DIFF_MAX_BYTES = 256 * 1024
 PR_URL_MAX = 500
 BRANCH_MAX = 255
+MODEL_MAX = 120
 
 _STATUSES = {s.value for s in BugStatus}
 _SEVERITIES = {s.value for s in Severity}
@@ -52,6 +53,37 @@ def _unit(value: Any) -> Optional[float]:
 def _latest_completed(analyses: list[dict[str, Any]], phase: str) -> Optional[dict[str, Any]]:
     for a in analyses:  # newest first
         if a.get("phase") == phase and a.get("status") == "completed":
+            return a
+    return None
+
+
+def _model_label(analysis: Optional[dict[str, Any]]) -> Optional[str]:
+    """`<provider>/<model>` of what actually ran (B5). `llm_model` is the litellm
+    string, already `ollama/…` / `anthropic/…` for the built-in providers, so the
+    provider is prefixed only when it is not there yet."""
+    model = (analysis or {}).get("llm_model")
+    if not isinstance(model, str) or not model:
+        return None
+    provider = (analysis or {}).get("llm_provider")
+    if isinstance(provider, str) and provider and not model.startswith(provider + "/"):
+        model = f"{provider}/{model}"
+    return model[:MODEL_MAX]
+
+
+def _fix_analysis(
+    analyses: list[dict[str, Any]], proposal: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """The `fix` analysis that produced `proposal`. Not `proposal.analysis_id`:
+    that is the localization the fix was built on. fix_proposer writes the fix
+    analysis and then its proposal back to back under one claim, and `_now()` is
+    strictly monotonic, so it is the newest completed fix analysis created no
+    later than the proposal."""
+    created = (proposal or {}).get("created_at")
+    if not isinstance(created, str) or not created:
+        return None
+    for a in analyses:  # newest first
+        if (a.get("phase") == "fix" and a.get("status") == "completed"
+                and isinstance(a.get("created_at"), str) and a["created_at"] <= created):
             return a
     return None
 
@@ -164,6 +196,10 @@ def build_payload(
             "diff": _diff((proposal or {}).get("diff")),
             "fixConfidence": _unit((proposal or {}).get("confidence")),
             "pr": pr,
+            # B5: which model produced each part (contract, Phase 52).
+            "triageModel": _model_label(triage),
+            "localizationModel": _model_label(localization),
+            "fixModel": _model_label(_fix_analysis(analyses, proposal)),
         },
     }
 
