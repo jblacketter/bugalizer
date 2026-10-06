@@ -274,6 +274,29 @@ tree-sitter / uv
   The cloud allowlist is retired. Bugalizer also pushes a six-lane `stage` for sonicgrid's
   new board, and reads fix PRs' state on GitHub so a merged PR completes the bug.
 - **Depends on:** Phase 11, Phase 8
+- **BOWIE activation check (2026-10-05, read-only; `docs/deploy-windows.md` §7e):**
+  - Sonicgrid S3b (credential endpoint, sonicgrid PR #638) merged 2026-10-04 and live;
+    newest production deploy is `03658bc` (PR #647, admin hard-load bounce fix, AI settings
+    moved to `/admin/bugs/ai-settings`).
+  - BOWIE runs `7c205bc` with `BUGALIZER_SONICGRID_USER_KEYS=true`: `/health`
+    `triage_sync.user_keys: true`, `paid_in_flight: 0`. No paid action was unfinished in the
+    ledger (last one 2026-10-03), so restarting through lan-mgr without the explicit
+    stop-and-confirm of step 2 was safe this time.
+  - **Not done:** step 3 also says to delete `BUGALIZER_SONICGRID_CLOUD_USERS` from `.env`;
+    the line is still there (ignored once user keys are on, but remove it).
+  - Sonicgrid side: the board drawer shows "Propose fix (Claude)", so the cloud button is not
+    paused. Whether Vercel's `BUGALIZER_USER_KEYS_ENABLED` is `true` (step 4) cannot be read
+    from BOWIE; confirm in Vercel.
+  - Jack's AI settings: an Anthropic key is saved (shown masked) and the default model is
+    `claude-sonnet-5-5`.
+  - Triage sync healthy after the restart: no `last_error`, 0 unresolved actions. The board's
+    "Bugalizer last heard from" time is the last result push, not a heartbeat.
+  - **Not yet verified:** a real credential release. The first Propose fix (Claude) from
+    sonicgrid is the end-to-end check (one paid call on Jack's key): expect the fix to run on
+    `claude-sonnet-5-5`, a usage row with `key_source=request` and
+    `key_ref=sonicgrid:<Jack's user id>`, and no use of the `.env` Anthropic key.
+  - Note: in this browser, `/admin/bugs` still bounced to `/home` until a cache-bypassing
+    reload; after that it loaded normally (stale pre-#647 JavaScript, likely).
 
 ### Phase 13: sonicgrid-result-models
 - **Status:** Plan codex-approved 2026-10-04 (round 1); implemented on
