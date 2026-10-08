@@ -8,7 +8,8 @@ One full end-to-end run of Bugalizer on sonicgrid, on current code:
 2. Bugalizer triages it
 3. **Propose fix** writes a diff, using the admin's own Claude key
 4. **Fix and open PR** opens a real PR on `spherop/sonicgrid`
-5. Merging, closing and reopening that PR come back to sonicgrid
+5. Merging or closing that PR shows up on the bug in sonicgrid, and **Reopen** in sonicgrid
+   sends the bug back to Bugalizer
 
 **Already working** (passed 2026-10-07): steps 1–3 work. They ran on Greg's key; see the
 Phase 12 notes in `roadmap.md`.
@@ -18,8 +19,11 @@ Phase 12 notes in `roadmap.md`.
 - **Bugalizer's sonicgrid copy was stale.** It sat at `d4be8626` (2026-09-14), 71 commits behind
   main. Fixes were written against old code, so their PRs would not apply.
 - **BOWIE has no GitHub token** (`github_configured: false`), so step 4 cannot run.
-- **`BUGALIZER_REOPEN_ENABLED=true`** is not yet set in sonicgrid's Vercel env. Step 5's reopen
-  needs it.
+- **`BUGALIZER_REOPEN_ENABLED=true`** is not yet set in sonicgrid's Vercel env. While it is
+  off, sonicgrid hides the **Reopen** button on finished bugs in `/admin/bugs` and refuses to
+  queue a reopen (`src/lib/bugalizer/reopen-flag.ts`). It was off on purpose: the older
+  Bugalizer (B3) rejected reopen requests. B4 handles them and is live on BOWIE, so it can be
+  turned on. Only step 5's reopen needs it.
 
 ## Why the copy matters
 
@@ -74,7 +78,10 @@ Pass: `/health` shows `"github_configured": true`.
    written against September's code and would fail with `diff_does_not_apply`.
 2. Wait for triage, then click **Propose fix** in `/admin/bugs`.
 3. Click **Fix and open PR**. The PR should appear on `spherop/sonicgrid`.
-4. Merge or close the PR, then reopen it. Check that each change shows up in sonicgrid.
+4. Merge or close the PR on GitHub. Check that the bug shows it as merged or closed in
+   `/admin/bugs`.
+5. Click **Reopen** on that bug in `/admin/bugs` (needs the Vercel flag). Check that Bugalizer
+   picks it up again.
 
 Filing the bug and Propose fix (1 and 2 above) don't need the token, so you can start them
 while waiting on Dan. Only Fix and open PR does.
