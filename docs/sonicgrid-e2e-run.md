@@ -16,8 +16,9 @@ Phase 12 notes in `roadmap.md`.
 
 **Still missing:**
 
-- **Bugalizer's sonicgrid copy was stale.** It sat at `d4be8626` (2026-09-14), 71 commits behind
-  main. Fixes were written against old code, so their PRs would not apply.
+- ~~**Bugalizer's sonicgrid copy was stale.**~~ Fixed 2026-10-07. It sat at `d4be8626`
+  (2026-09-14), 71 commits behind main, so fixes were written against old code. Greg updated it
+  by hand, and a scheduled task now keeps it current (below).
 - **BOWIE has no GitHub token** (`github_configured: false`), so step 4 cannot run.
 - **`BUGALIZER_REOPEN_ENABLED=true`** is not yet set in sonicgrid's Vercel env. While it is
   off, sonicgrid hides the **Reopen** button on finished bugs in `/admin/bugs` and refuses to
@@ -29,10 +30,11 @@ Phase 12 notes in `roadmap.md`.
 
 Bugalizer does **not** read `C:\Users\jblac\projects\sonicgrid`. When it localizes a bug and
 proposes a fix, it reads its **own** copy at `<bugalizer checkout>\repos\3e300658671b445e`.
-Nothing refreshes that copy automatically. `/projects/{id}/clone` and `/refresh-map` run a
-`git pull` without GitHub credentials, and that fails on the private repo. Until automatic
-refresh is built into Bugalizer (a planned follow-up), `scripts\windows\check-sonicgrid-copy.ps1`
-checks the copy and updates it from your local sonicgrid checkout.
+Bugalizer itself never refreshes that copy. `/projects/{id}/clone` and `/refresh-map` run a
+`git pull` without GitHub credentials, and that fails on the private repo. Instead,
+`scripts\windows\check-sonicgrid-copy.ps1` checks the copy and updates it from your local
+sonicgrid checkout. (A refresh built into Bugalizer is parked; build it only if the 30-minute
+delay causes trouble.)
 
 **On BOWIE this runs automatically.** `scripts\windows\register-sonicgrid-copy-task.ps1`
 registered the scheduled task **Bugalizer sonicgrid copy** (2026-10-07). Every 30 minutes it
@@ -43,24 +45,30 @@ branches, and resets Bugalizer's copy to it. The last run's output is in
 while you are logged on; re-run the register script from an elevated PowerShell to make it run
 whether or not you are logged on. `-Remove` deletes the task.
 
+The copy can move between steps. That is harmless for **Fix and open PR**, which fetches the
+current `main` from GitHub itself. But if the copy moves between localization and **Propose
+fix**, the fix reads newer files than the localization evidence describes. So run the task by
+hand right before filing the test bug (step 1 below).
+
 ## Steps (on BOWIE, in PowerShell)
 
-### 1. Check the copy (you, 2 minutes)
+### 1. Refresh the copy now (you, 1 minute)
+
+From the Bugalizer folder the service runs from:
 
 ```powershell
-cd <the Bugalizer folder the service runs from>
-git pull
-git -C C:\Users\jblac\projects\sonicgrid pull
-powershell -ExecutionPolicy Bypass -File scripts\windows\check-sonicgrid-copy.ps1
+Start-ScheduledTask -TaskName 'Bugalizer sonicgrid copy'
+Get-Content cache\sonicgrid-copy.log
 ```
 
-| Output | Meaning |
-|---|---|
-| `CURRENT` | Done. Go to step 2. |
-| `BEHIND` or `DIFFERENT` | Re-run the script with `-Update` at the end. |
-| `NOT FOUND` | You're in the wrong Bugalizer folder. The script lists Bugalizer's Windows services and the path each one runs from; `cd` there and run it again. |
+Wait a few seconds before reading the log. You want `CURRENT` or `UPDATED`.
 
-Send Claude the output, including the folder path. That path will go into `deploy-windows.md`.
+- **A fetch failure:** run `git -C C:\Users\jblac\projects\sonicgrid fetch origin main` yourself to
+  see the SSH error.
+- **`NOT FOUND`:** you're in the wrong Bugalizer folder. The output lists Bugalizer's services
+  and their paths.
+
+Send Claude the log and the folder path. The path goes into `deploy-windows.md`.
 
 ### 2. Dan creates the GitHub token (Dan, 5 minutes)
 
