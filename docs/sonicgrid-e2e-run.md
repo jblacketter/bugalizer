@@ -31,8 +31,17 @@ Bugalizer does **not** read `C:\Users\jblac\projects\sonicgrid`. When it localiz
 proposes a fix, it reads its **own** copy at `<bugalizer checkout>\repos\3e300658671b445e`.
 Nothing refreshes that copy automatically. `/projects/{id}/clone` and `/refresh-map` run a
 `git pull` without GitHub credentials, and that fails on the private repo. Until automatic
-refresh is built (a planned follow-up), `scripts\windows\check-sonicgrid-copy.ps1` checks the
-copy and updates it from your local sonicgrid checkout.
+refresh is built into Bugalizer (a planned follow-up), `scripts\windows\check-sonicgrid-copy.ps1`
+checks the copy and updates it from your local sonicgrid checkout.
+
+**On BOWIE this runs automatically.** `scripts\windows\register-sonicgrid-copy-task.ps1`
+registered the scheduled task **Bugalizer sonicgrid copy** (2026-10-07). Every 30 minutes it
+runs `check-sonicgrid-copy.ps1 -Fetch -Update`. That fetches `origin/main` into
+`C:\Users\jblac\projects\sonicgrid` using your SSH key, without touching your working tree or
+branches, and resets Bugalizer's copy to it. The last run's output is in
+`cache\sonicgrid-copy.log`. The task was registered from a non-elevated shell, so it runs only
+while you are logged on; re-run the register script from an elevated PowerShell to make it run
+whether or not you are logged on. `-Remove` deletes the task.
 
 ## Steps (on BOWIE, in PowerShell)
 

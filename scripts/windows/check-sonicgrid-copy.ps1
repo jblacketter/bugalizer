@@ -26,17 +26,27 @@
 .PARAMETER Update
   Fetch the source's main into the copy and reset the copy to it.
 
+.PARAMETER Fetch
+  First run `git fetch origin main` in the source and compare against
+  origin/main instead of the source's local main. This never touches the
+  source's working tree or branches, so it is safe while you work there.
+  The scheduled task (register-sonicgrid-copy-task.ps1) uses it.
+
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\windows\check-sonicgrid-copy.ps1
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\windows\check-sonicgrid-copy.ps1 -Update
+
+.EXAMPLE
+  powershell -ExecutionPolicy Bypass -File scripts\windows\check-sonicgrid-copy.ps1 -Fetch -Update
 #>
 [CmdletBinding()]
 param(
     [string]$Source = "C:\Users\jblac\projects\sonicgrid",
     [string]$ProjectId = "3e300658671b445e",
-    [switch]$Update
+    [switch]$Update,
+    [switch]$Fetch
 )
 
 $ErrorActionPreference = "Continue"
@@ -74,13 +84,20 @@ Write-Host "Copy HEAD:          $(Get-Line $copy 'HEAD')"
 Write-Host ""
 Write-Host "== Source (current sonicgrid main) ==" -ForegroundColor Cyan
 Write-Host "Source:             $Source"
-$srcMain = Get-Head $Source "main"
+$srcRef = "main"
+if ($Fetch) {
+    # Updates only refs/remotes/origin/main; the working tree is untouched.
+    & git -C $Source fetch --quiet origin main
+    if ($LASTEXITCODE -ne 0) { Write-Host "fetch of origin main in $Source failed" -ForegroundColor Red; exit 2 }
+    $srcRef = "refs/remotes/origin/main"
+}
+$srcMain = Get-Head $Source $srcRef
 if (-not $srcMain) {
-    Write-Host "Cannot read main in $Source. Pass -Source <a sonicgrid checkout>." -ForegroundColor Red
+    Write-Host "Cannot read $srcRef in $Source. Pass -Source <a sonicgrid checkout>." -ForegroundColor Red
     exit 2
 }
-Write-Host "Source main:        $(Get-Line $Source 'main')"
-Write-Host "(Pull the source first if unsure: git -C $Source pull)"
+Write-Host "Source main:        $(Get-Line $Source $srcRef)"
+if (-not $Fetch) { Write-Host "(Pull the source first if unsure: git -C $Source pull)" }
 
 Write-Host ""
 if ($copyHead -eq $srcMain) {
@@ -109,7 +126,7 @@ if ($dirty) {
     $dirty | ForEach-Object { Write-Host "  $_" }
     exit 1
 }
-& git -C $copy fetch $Source main
+& git -C $copy fetch $Source $srcRef
 if ($LASTEXITCODE -ne 0) { Write-Host "fetch failed" -ForegroundColor Red; exit 1 }
 & git -C $copy reset --hard FETCH_HEAD
 if ($LASTEXITCODE -ne 0) { Write-Host "reset failed" -ForegroundColor Red; exit 1 }
