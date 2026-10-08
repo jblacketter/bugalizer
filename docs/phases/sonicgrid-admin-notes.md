@@ -1,6 +1,6 @@
 # Phase 14: sonicgrid-admin-notes (B6)
 
-Status: plan, round 2. Pairs with sonicgrid Phase 54 `bug-admin-notes`.
+Status: plan, round 3. Pairs with sonicgrid Phase 54 `bug-admin-notes`.
 
 ## Summary
 
@@ -42,12 +42,16 @@ In:
 5. **Notes in four prompts:** triage, localization pass 1, localization pass 2, and the
    fix-proposal **user** template (the cached system prompt is unchanged). The block is omitted
    when the notes are empty, so prompts for bugs without notes are byte-identical to today.
-6. Tests (see Testing).
+6. **Push `admin.triageNotesVersion`** (round 3). This is the `notes_version` of the latest
+   completed, non-superseded triage, or null. It goes in `sync/results.py` `build_payload`, next to
+   `triageModel`. It gives sonicgrid authoritative evidence that triage used a given version,
+   which the delivery line in Phase 54 shows. `fingerprint()` covers `admin`, so a new version
+   re-pushes.
+7. Tests (see Testing).
 
 Out:
-- Any change to the result push. Bugalizer does not echo notes back; sonicgrid already has them.
-  This matters because sonicgrid's push schema is strict, and an unknown field gets `400` on
-  every push.
+- Echoing the notes text back. Only the version is pushed (scope 6). sonicgrid's push schema is
+  strict: an unknown field gets `400` on every push, so scope 6 depends on the rollout order.
 - Automatic cloud spend. Re-triage re-runs local stages only. A new cloud fix still needs a human
   click (Propose fix), as today.
 - Closing an already-open PR when notes change (O1 below).
@@ -141,9 +145,19 @@ instructions.
 
 ## Rollout
 
-Bugalizer deploys first. The order is safe either way: an old Bugalizer refuses `update_notes`
-with "Unknown action kind" (`sync/actions.py:177`), which shows in sonicgrid's timeline and
-breaks nothing. An unknown `adminNotes` in the poll payload is ignored (`extra="ignore"`).
+**The order is a requirement** (round 3, Codex's sonicgrid round 2). It matches Phase 54's
+rollout:
+
+1. **sonicgrid deploys first**, with `BUGALIZER_NOTES_ENABLED` off. Its push schema then accepts
+   `admin.triageNotesVersion`, and the poll serves `adminNotes`/`adminNotesVersion`. This must
+   come first: otherwise this phase's push gets `400` on every bug and board sync stops (the same
+   constraint as Phase 13).
+2. **Then deploy this phase to BOWIE** and verify it with `check-service.ps1`, which must show
+   `VERIFIED` at a revision that contains Phase 14.
+3. **Then sonicgrid turns on `BUGALIZER_NOTES_ENABLED`.** Until then no `update_notes` is ever
+   queued, so an old Bugalizer never refuses one. If one is refused anyway, sonicgrid's **Resend**
+   re-delivers the current version. A refused delivery stored nothing here, so the version is
+   still newer than what Bugalizer has and is applied.
 
 ## Files (expected)
 
@@ -158,6 +172,7 @@ breaks nothing. An unknown `adminNotes` in the poll payload is ignored (`extra="
 - `src/bugalizer/sync/actions.py`: the `update_notes` kind, its param checks and the inline handler
 - `src/bugalizer/queue/worker.py`: the notes-stale reset step, before Stage 2
 - `src/bugalizer/pipeline/triage.py`, `localizer.py`: stamp `analyses.notes_version`
+- `src/bugalizer/sync/results.py`: `admin.triageNotesVersion`
 - `src/bugalizer/llm/prompts.py` and the four call sites (`triage.py`, `localizer.py` ×2,
   `fix_proposer.py`)
 - `docs/roadmap.md`: the Phase 14 entry
@@ -193,8 +208,11 @@ breaks nothing. An unknown `adminNotes` in the poll payload is ignored (`extra="
   - a `hold` report without notes → never triaged (unchanged)
 - **Prompts:** new direct tests for the four `format_*` builders, checking that notes appear when
   set and that output is byte-identical to today when they are empty.
-- **Push payload:** after a reset and re-triage, the stage goes back to triaged with a higher
-  revision.
+- **Push payload:**
+  - after a reset and re-triage, the stage goes back to triaged with a higher revision
+  - `admin.triageNotesVersion` is null before any notes, equals the version the latest
+    non-superseded triage stamped, and a superseded triage doesn't count
+  - a new version changes the fingerprint
 - **Full suite:** once, on submission.
 
 ## Success criteria
